@@ -4,13 +4,22 @@ import PixelCrusherMacCore
 
 @MainActor
 final class UpdateCheckViewModel: ObservableObject {
-    @Published private(set) var isChecking = false
-    @Published private(set) var statusMessage: String?
+    @Published private(set) var state: InAppUpdaterState = .idle
     @Published private(set) var latestVersion: String?
     @Published private(set) var releaseNotes: String?
-    @Published private(set) var downloadURL: URL?
 
     private let currentVersionProvider: () -> String
+    private var latestCheckResult: UpdateCheckResult?
+    private var stateMachine = InAppUpdaterStateMachine()
+
+    private let owner = "lubomirmolin"
+    private let repo = "pixelcrusher"
+    private let bundleIdentifier = "com.lubo.pixelcrusher"
+    private let appName = "PixelCrusher"
+
+    private var releasesPageURL: URL {
+        URL(string: "https://github.com/\(owner)/\(repo)/releases")!
+    }
 
     init(
         currentVersionProvider: @escaping () -> String = {
@@ -20,42 +29,158 @@ final class UpdateCheckViewModel: ObservableObject {
         self.currentVersionProvider = currentVersionProvider
     }
 
+    var isChecking: Bool {
+        if case .checking = state { return true }
+        return false
+    }
+
+    var isInstalling: Bool {
+        switch state {
+        case .downloading, .installing, .relaunching:
+            return true
+        default:
+            return false
+        }
+    }
+
+    var canInstall: Bool {
+        if case .updateAvailable = state {
+            return latestCheckResult?.preferredAsset != nil
+        }
+        return false
+    }
+
+    var stateMessage: String {
+        switch state {
+        case .idle:
+            return "Manual update checks only."
+        case .checking:
+            return "Checking GitHub releases…"
+        case .updateAvailable(let latestVersion):
+            return "Update available: \(latestVersion)."
+        case .upToDate(let currentVersion):
+            return "You're up to date (\(currentVersion))."
+        case .downloading(let progress):
+            if let progress {
+                return "Downloading update: \(Int((progress * 100).rounded()))%"
+            }
+            return "Downloading update…"
+        case .installing:
+            return "Preparing installation…"
+        case .relaunching:
+            return "Installing and relaunching PixelCrusher…"
+        case .failed(let reason):
+            return reason
+        }
+    }
+
+    var showOpenReleasesFallback: Bool {
+        if case .failed = state { return true }
+        if case .updateAvailable = state {
+            return latestCheckResult?.preferredAsset == nil
+        }
+        return false
+    }
+
     func checkForUpdates() {
-        guard !isChecking else { return }
-        isChecking = true
-        statusMessage = nil
+        guard !isChecking, !isInstalling else { return }
+        transition(.startChecking)
 
         Task {
-            defer { isChecking = false }
-
             do {
-                let currentVersion = currentVersionProvider()
-                let checker = GitHubReleaseUpdateChecker(owner: "lubomirmolin", repo: "pixelcrusher")
-                let result = try await checker.checkForUpdate(currentVersionString: currentVersion, platform: .macOS)
+                let updater = makeUpdater()
+                let result = try await updater.checkForUpdates(currentVersion: currentVersionProvider())
 
                 if result.isUpdateAvailable {
+                    latestCheckResult = result
                     latestVersion = result.latestVersion.description
                     releaseNotes = result.release.body?.trimmingCharacters(in: .whitespacesAndNewlines)
-                    downloadURL = result.downloadURL
-                    statusMessage = "Update available: \(result.latestVersion.description) (current \(result.currentVersion.description))"
+                    transition(.setUpdateAvailable(latestVersion: result.latestVersion.description))
                 } else {
+                    latestCheckResult = nil
                     latestVersion = nil
                     releaseNotes = nil
-                    downloadURL = nil
-                    statusMessage = "You're up to date (\(result.currentVersion.description))."
+                    transition(.setUpToDate(currentVersion: result.currentVersion.description))
                 }
             } catch {
+                latestCheckResult = nil
                 latestVersion = nil
                 releaseNotes = nil
-                downloadURL = nil
-                statusMessage = "Update check failed: \(error.localizedDescription)"
+                transition(.fail(checkErrorMessage(for: error)))
             }
         }
     }
 
-    func openDownload() {
-        guard let downloadURL else { return }
-        NSWorkspace.shared.open(downloadURL)
+    func installUpdate() {
+        guard !isInstalling,
+              let latestCheckResult,
+              latestCheckResult.isUpdateAvailable else {
+            return
+        }
+
+        Task {
+            do {
+                let updater = makeUpdater()
+                _ = try await updater.prepareAndLaunchInstall(
+                    from: latestCheckResult,
+                    currentAppBundleURL: Bundle.main.bundleURL
+                ) { [weak self] stage in
+                    Task { @MainActor [weak self] in
+                        self?.consumeInstallProgress(stage)
+                    }
+                }
+
+                transition(.setRelaunching)
+                NSApplication.shared.terminate(nil)
+            } catch {
+                transition(.fail(error.localizedDescription))
+            }
+        }
+    }
+
+    func openReleasesPage() {
+        NSWorkspace.shared.open(releasesPageURL)
+    }
+
+    private func consumeInstallProgress(_ stage: InAppUpdaterInstallProgress) {
+        switch stage {
+        case .downloading(let fraction):
+            transition(.setDownloadProgress(fraction))
+        case .installing:
+            transition(.startInstalling)
+        case .relaunching:
+            transition(.setRelaunching)
+        }
+    }
+
+    private func transition(_ event: InAppUpdaterEvent) {
+        stateMachine.apply(event)
+        state = stateMachine.state
+    }
+
+    private func makeUpdater() -> GitHubInAppUpdater {
+        let authToken = GitHubTokenResolver.resolve()
+        let configuration = UpdateRepositoryConfiguration(
+            owner: owner,
+            repo: repo,
+            appName: appName,
+            bundleIdentifier: bundleIdentifier,
+            releasesPageURL: releasesPageURL,
+            authToken: authToken
+        )
+
+        return GitHubInAppUpdater(configuration: configuration)
+    }
+
+    private func checkErrorMessage(for error: Error) -> String {
+        switch error {
+        case GitHubReleaseClientError.notFoundLatestRelease:
+            return "Could not access latest release (404). The repository may be private or there may be no published release yet. You can still open the Releases page directly."
+        case GitHubReleaseClientError.unauthorizedOrForbidden:
+            return "GitHub denied access to releases. For private repos set PIXELCRUSHER_GITHUB_TOKEN or defaults key PixelCrusherGitHubToken."
+        default:
+            return "Update check failed: \(error.localizedDescription)"
+        }
     }
 }
 
@@ -72,18 +197,16 @@ struct UpdateOptionsCard: View {
                     model.checkForUpdates()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.isChecking)
+                .disabled(model.isChecking || model.isInstalling)
             }
 
-            Text("Manual check only. No background auto-update.")
+            Text("User-initiated updater only. No background auto-update daemon.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            if let status = model.statusMessage {
-                Text(status)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            Text(model.stateMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             if let latestVersion = model.latestVersion {
                 Text("Latest release: \(latestVersion)")
@@ -104,9 +227,17 @@ struct UpdateOptionsCard: View {
                 )
             }
 
-            if model.downloadURL != nil {
-                Button("Open Download") {
-                    model.openDownload()
+            if model.canInstall {
+                Button("Download & Install Update") {
+                    model.installUpdate()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.isInstalling)
+            }
+
+            if model.showOpenReleasesFallback {
+                Button("Open Releases Page") {
+                    model.openReleasesPage()
                 }
                 .buttonStyle(.bordered)
             }

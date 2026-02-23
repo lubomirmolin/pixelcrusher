@@ -6,7 +6,7 @@ PixelCrusher is now a **native macOS SwiftUI app** backed by a Rust processing e
 - **Backend/core:** Rust (`crates/pixelcrusher-core`)
 - **Bridge:** bundled Rust CLI (`pixelcrusher-cli`) with JSON stdin/stdout status events
 - **Bundled optimizers:** `cjpeg`, `pngquant`, `pngcrush`, `svgo`, `gifsicle` (+ optional `zopflipng`)
-- **Manual update check:** “Check for Updates” button in the app options pane (queries GitHub Releases, no auto-update daemon)
+- **In-app updater (user initiated):** check latest release, download macOS asset, install to `/Applications/PixelCrusher.app`, relaunch
 
 The Tauri app path is used for Windows/Linux installers, while macOS release artifacts are produced by the SwiftUI packaging pipeline.
 
@@ -38,7 +38,7 @@ cargo test --manifest-path crates/pixelcrusher-core/Cargo.toml
 swift test
 ```
 
-### macOS release (.app + .dmg)
+### macOS release (.app + .zip + .dmg)
 
 ```bash
 bash scripts/build-macos.sh
@@ -76,17 +76,61 @@ npm run bundled-tools:check:linux
 npm run bundled-tools:check:windows
 ```
 
-## Manual update button (macOS app)
+## In-app updater (macOS app)
 
-In the right-side **Options** pane, click **Check for Updates**.
+In the right-side **Options** pane:
+
+1. Click **Check for Updates**
+2. If a newer release exists, click **Download & Install Update**
 
 Behavior:
 
-- Calls GitHub API `repos/lubomirmolin/pixelcrusher/releases/latest`
-- Parses semantic versions from the current app bundle version and release tag (supports `vX.Y.Z`)
-- If a newer release exists: shows version + notes + **Open Download**
-- If current version is latest: shows up-to-date confirmation
-- No background polling / no automatic install
+- User-initiated only (no background auto-update daemon)
+- Checks GitHub API `repos/lubomirmolin/pixelcrusher/releases/latest`
+- Compares semantic versions (`vX.Y.Z` tags supported)
+- Prefers macOS `.zip` release asset for in-place update (falls back to `.dmg`)
+- Downloads update, validates app bundle identifier, stages install, swaps app in `/Applications`, then relaunches
+- Uses a helper script launched by the app, so the running app never overwrites itself
+- Performs backup + rollback during swap if install move fails
+
+Updater UI states include:
+
+- checking
+- update available
+- downloading percentage
+- installing
+- relaunching
+- failed reason
+
+### Private vs public repositories
+
+`/releases/latest` can return `404` when:
+
+- no release exists yet, or
+- the repository is private and unauthenticated
+
+When API check is unavailable, the app shows a clear failure reason and **Open Releases Page** fallback.
+
+### Optional GitHub token (for private repos / higher rate limits)
+
+Updater checks these token sources (in order):
+
+1. `PIXELCRUSHER_GITHUB_TOKEN`
+2. `GITHUB_TOKEN`
+3. macOS defaults key `PixelCrusherGitHubToken`
+
+Set defaults key example:
+
+```bash
+defaults write com.lubo.pixelcrusher PixelCrusherGitHubToken "ghp_your_token_here"
+```
+
+### Permission notes (first in-app update)
+
+The updater installs to `/Applications/PixelCrusher.app`.
+
+- If `/Applications` is writable for current user: update proceeds in-app.
+- If not writable: updater fails gracefully with guidance to move app to `~/Applications` or update manually via release download.
 
 ## GitHub Actions CI + Releases
 

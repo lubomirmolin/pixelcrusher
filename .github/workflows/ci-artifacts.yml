@@ -36,6 +36,9 @@ jobs:
       - name: Build native macOS artifacts
         run: bash scripts/build-macos.sh
 
+      - name: Verify updater asset (macOS ZIP)
+        run: test -f dist/PixelCrusher.zip
+
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:

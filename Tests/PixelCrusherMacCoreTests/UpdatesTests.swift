@@ -19,24 +19,24 @@ struct UpdatesTests {
         #expect(SemanticVersion(parsing: "1.10.0")! > SemanticVersion(parsing: "1.2.9")!)
     }
 
-    @Test("GitHub release decoding picks preferred macOS installer URL")
+    @Test("GitHub release decoding prefers macOS ZIP for in-app updater")
     func releaseDecodingAndPreferredAsset() throws {
         let payload = #"""
         {
           "tag_name": "v1.4.0",
           "name": "PixelCrusher 1.4.0",
-          "body": "- Added manual update checks\n- Added release artifacts",
+          "body": "- Added in-app updater",
           "html_url": "https://github.com/lubomirmolin/pixelcrusher/releases/tag/v1.4.0",
           "assets": [
-            {
-              "name": "PixelCrusher-setup.exe",
-              "browser_download_url": "https://example.com/PixelCrusher-setup.exe",
-              "content_type": "application/octet-stream"
-            },
             {
               "name": "PixelCrusher.dmg",
               "browser_download_url": "https://example.com/PixelCrusher.dmg",
               "content_type": "application/x-apple-diskimage"
+            },
+            {
+              "name": "PixelCrusher.zip",
+              "browser_download_url": "https://example.com/PixelCrusher.zip",
+              "content_type": "application/zip"
             }
           ]
         }
@@ -47,7 +47,22 @@ struct UpdatesTests {
 
         #expect(release.tagName == "v1.4.0")
         #expect(release.semanticVersion == SemanticVersion(parsing: "1.4.0"))
-        #expect(release.preferredAssetURL(for: .macOS)?.absoluteString == "https://example.com/PixelCrusher.dmg")
-        #expect(release.preferredAssetURL(for: .windows)?.absoluteString == "https://example.com/PixelCrusher-setup.exe")
+        #expect(release.preferredAsset(for: .macOS)?.name == "PixelCrusher.zip")
+        #expect(release.preferredAssetURL(for: .macOS)?.absoluteString == "https://example.com/PixelCrusher.zip")
+    }
+
+    @Test("Token resolver checks env first then defaults")
+    func tokenResolverPriority() {
+        let defaults = UserDefaults(suiteName: "UpdatesTests-\(UUID().uuidString)")!
+        defaults.set("defaults-token", forKey: "PixelCrusherGitHubToken")
+
+        let resolvedFromEnv = GitHubTokenResolver.resolve(
+            environment: ["PIXELCRUSHER_GITHUB_TOKEN": "env-token"],
+            defaults: defaults
+        )
+        #expect(resolvedFromEnv == "env-token")
+
+        let resolvedFromDefaults = GitHubTokenResolver.resolve(environment: [:], defaults: defaults)
+        #expect(resolvedFromDefaults == "defaults-token")
     }
 }

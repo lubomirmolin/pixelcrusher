@@ -126,15 +126,17 @@ public struct SemanticVersion: Comparable, Hashable, CustomStringConvertible, Se
     }
 }
 
-public struct GitHubReleaseAsset: Decodable, Sendable {
+public struct GitHubReleaseAsset: Decodable, Sendable, Hashable {
     public let name: String
     public let browserDownloadURL: URL
     public let contentType: String?
+    public let digest: String?
 
     enum CodingKeys: String, CodingKey {
         case name
         case browserDownloadURL = "browser_download_url"
         case contentType = "content_type"
+        case digest
     }
 }
 
@@ -164,28 +166,33 @@ public struct GitHubRelease: Decodable, Sendable {
         SemanticVersion(parsing: tagName)
     }
 
-    public func preferredAssetURL(for platform: ReleaseAssetPlatform = .macOS) -> URL? {
+    public func preferredAsset(for platform: ReleaseAssetPlatform = .macOS) -> GitHubReleaseAsset? {
         let rankedExtensions: [String]
         switch platform {
         case .macOS:
-            rankedExtensions = ["dmg", "zip", "pkg"]
+            // Prefer ZIP for in-place updater flow (no mount required).
+            rankedExtensions = ["zip", "dmg", "pkg"]
         case .windows:
             rankedExtensions = ["msi", "exe"]
         case .linux:
             rankedExtensions = ["appimage", "deb"]
         case .any:
-            rankedExtensions = ["dmg", "zip", "pkg", "msi", "exe", "appimage", "deb"]
+            rankedExtensions = ["zip", "dmg", "pkg", "msi", "exe", "appimage", "deb"]
         }
 
         for expectedExtension in rankedExtensions {
             if let asset = assets.first(where: {
                 $0.name.lowercased().hasSuffix(".\(expectedExtension)")
             }) {
-                return asset.browserDownloadURL
+                return asset
             }
         }
 
         return nil
+    }
+
+    public func preferredAssetURL(for platform: ReleaseAssetPlatform = .macOS) -> URL? {
+        preferredAsset(for: platform)?.browserDownloadURL
     }
 }
 
@@ -193,7 +200,22 @@ public struct UpdateCheckResult: Sendable {
     public let currentVersion: SemanticVersion
     public let latestVersion: SemanticVersion
     public let release: GitHubRelease
+    public let preferredAsset: GitHubReleaseAsset?
     public let downloadURL: URL?
+
+    public init(
+        currentVersion: SemanticVersion,
+        latestVersion: SemanticVersion,
+        release: GitHubRelease,
+        preferredAsset: GitHubReleaseAsset?,
+        downloadURL: URL?
+    ) {
+        self.currentVersion = currentVersion
+        self.latestVersion = latestVersion
+        self.release = release
+        self.preferredAsset = preferredAsset
+        self.downloadURL = downloadURL
+    }
 
     public var isUpdateAvailable: Bool {
         latestVersion > currentVersion
@@ -202,6 +224,9 @@ public struct UpdateCheckResult: Sendable {
 
 public enum GitHubReleaseClientError: LocalizedError {
     case invalidResponse
+    case notFoundLatestRelease(owner: String, repo: String)
+    case unauthorizedOrForbidden(statusCode: Int)
+    case rateLimited
     case httpError(statusCode: Int, body: String)
     case decodeFailed
 
@@ -209,6 +234,12 @@ public enum GitHubReleaseClientError: LocalizedError {
         switch self {
         case .invalidResponse:
             return "GitHub API returned an invalid response."
+        case .notFoundLatestRelease(let owner, let repo):
+            return "GitHub API /releases/latest returned 404 for \(owner)/\(repo). This usually means there is no published release yet, or the repository is private and needs a token."
+        case .unauthorizedOrForbidden(let statusCode):
+            return "GitHub API request failed with status \(statusCode). If this repository is private, configure a GitHub token (PIXELCRUSHER_GITHUB_TOKEN or defaults key PixelCrusherGitHubToken)."
+        case .rateLimited:
+            return "GitHub API rate limit reached. Please try again later or set a GitHub token."
         case .httpError(let statusCode, let body):
             if body.isEmpty {
                 return "GitHub API request failed with status \(statusCode)."
@@ -220,13 +251,19 @@ public enum GitHubReleaseClientError: LocalizedError {
     }
 }
 
-public struct GitHubReleaseClient {
+public struct GitHubReleaseClient: Sendable {
     private let session: URLSession
     private let decoder: JSONDecoder
+    private let authToken: String?
 
-    public init(session: URLSession = .shared, decoder: JSONDecoder = JSONDecoder()) {
+    public init(
+        session: URLSession = .shared,
+        decoder: JSONDecoder = JSONDecoder(),
+        authToken: String? = nil
+    ) {
         self.session = session
         self.decoder = decoder
+        self.authToken = authToken?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     public func fetchLatestRelease(owner: String, repo: String) async throws -> GitHubRelease {
@@ -239,14 +276,27 @@ public struct GitHubReleaseClient {
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("PixelCrusher-UpdateCheck", forHTTPHeaderField: "User-Agent")
 
+        if let authToken, !authToken.isEmpty {
+            request.setValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization")
+        }
+
         let (data, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw GitHubReleaseClientError.invalidResponse
         }
 
         guard (200..<300).contains(httpResponse.statusCode) else {
-            let responseText = String(data: data, encoding: .utf8) ?? ""
-            throw GitHubReleaseClientError.httpError(statusCode: httpResponse.statusCode, body: responseText)
+            switch httpResponse.statusCode {
+            case 401, 403:
+                throw GitHubReleaseClientError.unauthorizedOrForbidden(statusCode: httpResponse.statusCode)
+            case 404:
+                throw GitHubReleaseClientError.notFoundLatestRelease(owner: owner, repo: repo)
+            case 429:
+                throw GitHubReleaseClientError.rateLimited
+            default:
+                let responseText = String(data: data, encoding: .utf8) ?? ""
+                throw GitHubReleaseClientError.httpError(statusCode: httpResponse.statusCode, body: responseText)
+            }
         }
 
         do {
@@ -271,7 +321,7 @@ public enum UpdateCheckError: LocalizedError {
     }
 }
 
-public struct GitHubReleaseUpdateChecker {
+public struct GitHubReleaseUpdateChecker: Sendable {
     public let owner: String
     public let repo: String
     public let client: GitHubReleaseClient
@@ -297,11 +347,35 @@ public struct GitHubReleaseUpdateChecker {
             throw UpdateCheckError.invalidReleaseTag(release.tagName)
         }
 
+        let preferredAsset = release.preferredAsset(for: platform)
         return UpdateCheckResult(
             currentVersion: currentVersion,
             latestVersion: latestVersion,
             release: release,
-            downloadURL: release.preferredAssetURL(for: platform) ?? release.htmlURL
+            preferredAsset: preferredAsset,
+            downloadURL: preferredAsset?.browserDownloadURL ?? release.htmlURL
         )
+    }
+}
+
+public enum GitHubTokenResolver {
+    public static func resolve(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        defaults: UserDefaults = .standard
+    ) -> String? {
+        let candidates: [String?] = [
+            environment["PIXELCRUSHER_GITHUB_TOKEN"],
+            environment["GITHUB_TOKEN"],
+            defaults.string(forKey: "PixelCrusherGitHubToken")
+        ]
+
+        for candidate in candidates {
+            guard let raw = candidate?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+                continue
+            }
+            return raw
+        }
+
+        return nil
     }
 }
