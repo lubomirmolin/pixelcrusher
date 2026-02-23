@@ -2,15 +2,21 @@ name: CI Artifacts
 
 on:
   push:
-    branches: ["**"]
+    branches: ["main"]
     tags-ignore: ["v*"]
   pull_request:
+    branches: ["main"]
+
+concurrency:
+  group: ci-artifacts-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   macos-native:
+    if: github.event_name == 'push'
     name: macOS native app (.dmg/.zip)
     runs-on: macos-latest
 
@@ -92,6 +98,7 @@ jobs:
             dist/bundle-evidence/bundled-tools-linux.txt
 
   windows-tauri:
+    if: github.event_name == 'push'
     name: Windows Tauri bundles (.msi/.exe)
     runs-on: windows-latest
 
