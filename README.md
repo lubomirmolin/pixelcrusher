@@ -6,6 +6,7 @@ PixelCrusher is now a **native macOS SwiftUI app** backed by a Rust processing e
 - **Backend/core:** Rust (`crates/pixelcrusher-core`)
 - **Bridge:** bundled Rust CLI (`pixelcrusher-cli`) with JSON stdin/stdout status events
 - **Bundled optimizers:** `cjpeg`, `pngquant`, `pngcrush`, `svgo`, `gifsicle` (+ optional `zopflipng`)
+- **Manual update check:** “Check for Updates” button in the app options pane (queries GitHub Releases, no auto-update daemon)
 
 The previous Tauri rewrite is still in the repository for reference, but macOS release artifacts are produced by the SwiftUI packaging pipeline.
 
@@ -51,6 +52,45 @@ The DMG includes:
 
 - `PixelCrusher.app`
 - `/Applications` symlink (drag-and-drop install flow)
+
+## Manual update button (macOS app)
+
+In the right-side **Options** pane, click **Check for Updates**.
+
+Behavior:
+
+- Calls GitHub API `repos/lubomirmolin/pixelcrusher/releases/latest`
+- Parses semantic versions from the current app bundle version and release tag (supports `vX.Y.Z`)
+- If a newer release exists: shows version + notes + **Open Download**
+- If current version is latest: shows up-to-date confirmation
+- No background polling / no automatic install
+
+## GitHub Actions CI + Releases
+
+Workflows:
+
+- `.github/workflows/ci-artifacts.yml`
+  - Trigger: pushes + pull requests
+  - Builds installer artifacts and uploads them as CI artifacts:
+    - macOS native: `.dmg`, `.zip`
+    - Windows (Tauri): `.msi`, `.exe` (NSIS)
+    - Linux (Tauri): `.AppImage`, `.deb`
+
+- `.github/workflows/release.yml`
+  - Trigger: git tags matching `v*` (for example `v1.2.0`)
+  - Builds all platform artifacts and publishes them to GitHub Releases
+
+### Release flow
+
+1. Ensure version/tag is ready.
+2. Push a semver tag:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+3. GitHub Release is created/updated with generated notes + installer files.
 
 ## Runtime notes
 

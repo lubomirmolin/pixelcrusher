@@ -663,6 +663,8 @@ struct ContentView: View {
                 if optionsGroupVisible(.optimizers) {
                     optimizerOptionsGroup
                 }
+
+                UpdateOptionsCard()
             }
             .padding(16)
         }

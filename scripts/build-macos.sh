@@ -14,11 +14,14 @@ ZIP_PATH="$DIST_DIR/${APP_NAME}.zip"
 DMG_PATH="$DIST_DIR/${APP_NAME}.dmg"
 DMG_STAGING_DIR="$DIST_DIR/dmg-staging"
 ICON_SOURCE_PNG="$ROOT_DIR/src-tauri/icons/icon.png"
+ICON_SOURCE_ICNS="$ROOT_DIR/resources/PixelCrusher-macOS.icns"
 ICONSET_DIR="$DIST_DIR/AppIcon.iconset"
 ICNS_PATH="$APP_DIR/Contents/Resources/AppIcon.icns"
 BUNDLED_TOOLS_DIR="$APP_DIR/Contents/Resources/BundledTools"
 SWIFT_BINARY="$ROOT_DIR/.build/release/$SWIFT_PRODUCT"
 RUST_CLI_BINARY="$ROOT_DIR/crates/pixelcrusher-core/target/release/pixelcrusher-cli"
+APP_VERSION="${PIXELCRUSHER_VERSION:-0.1.0}"
+APP_BUILD_NUMBER="${PIXELCRUSHER_BUILD_NUMBER:-1}"
 
 cargo test --manifest-path crates/pixelcrusher-core/Cargo.toml
 swift test
@@ -35,7 +38,9 @@ chmod +x "$APP_DIR/Contents/MacOS/$APP_EXECUTABLE" "$APP_DIR/Contents/MacOS/pixe
 
 "$ROOT_DIR/scripts/build_bundled_tools.sh" "$BUNDLED_TOOLS_DIR"
 
-if [[ -f "$ICON_SOURCE_PNG" ]]; then
+if [[ -f "$ICON_SOURCE_ICNS" ]]; then
+  cp "$ICON_SOURCE_ICNS" "$ICNS_PATH"
+elif [[ -f "$ICON_SOURCE_PNG" ]]; then
   rm -rf "$ICONSET_DIR"
   mkdir -p "$ICONSET_DIR"
 
@@ -73,9 +78,9 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>$APP_VERSION</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>$APP_BUILD_NUMBER</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>CFBundleDocumentTypes</key>
