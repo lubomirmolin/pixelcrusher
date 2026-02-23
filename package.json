@@ -13,6 +13,7 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "tauri:build:app": "tauri build --bundles app",
+    "build:mac": "bash scripts/build-macos.sh",
     "tauri:build:mac": "bash scripts/build-macos.sh",
     "tauri:build:linux": "tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb",
     "tauri:build:windows": "tauri build --target x86_64-pc-windows-msvc --bundles msi,nsis"

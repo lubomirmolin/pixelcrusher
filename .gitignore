@@ -9,6 +9,8 @@ lerna-debug.log*
 
 node_modules
 dist
+.build
+crates/pixelcrusher-core/target
 dist-ssr
 *.local
 

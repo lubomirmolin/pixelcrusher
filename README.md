@@ -1,114 +1,65 @@
 # PixelCrusher
 
-PixelCrusher is the cross-platform rewrite of PNGAutoCrop.
+PixelCrusher is now a **native macOS SwiftUI app** backed by a Rust processing engine.
 
-- **Frontend:** React + TypeScript (Vite)
-- **Desktop shell:** Tauri 2
-- **Core engine:** Rust crate (`crates/pixelcrusher-core`) for format detection, crop/resize, optimization orchestration, and queue state machine.
+- **Frontend (macOS):** SwiftUI (`Sources/PixelCrusherMac/main.swift`)
+- **Backend/core:** Rust (`crates/pixelcrusher-core`)
+- **Bridge:** bundled Rust CLI (`pixelcrusher-cli`) with JSON stdin/stdout status events
+- **Bundled optimizers:** `cjpeg`, `pngquant`, `pngcrush`, `svgo`, `gifsicle` (+ optional `zopflipng`)
 
-> The original Swift app in `../png-autocrop` is intentionally kept as rollback only.
+The previous Tauri rewrite is still in the repository for reference, but macOS release artifacts are produced by the SwiftUI packaging pipeline.
 
-## Project structure
+## Repository layout
 
 ```text
 pixelcrusher/
-  src/                         # React UI (drop zone, queue, results, options)
-  src/state/                   # frontend reducer + tests
-  src-tauri/                   # Tauri host app + commands/events
-  crates/pixelcrusher-core/    # Rust core processing engine
-  scripts/build-local.sh       # local build pipeline helper
+  Sources/PixelCrusherMac/             # SwiftUI macOS app
+  Sources/PixelCrusherMacCore/         # Swift-side queue, options, backend bridge, tool resolver
+  Tests/PixelCrusherMacCoreTests/      # Swift tests (resolver, backend invocation, bundle checks)
+  crates/pixelcrusher-core/            # Rust processing core + CLI binary (pixelcrusher-cli)
+  scripts/build_bundled_tools.sh       # Bundles optimizer toolchain into app resources
+  scripts/build-macos.sh               # Builds .app + .dmg (with /Applications symlink)
 ```
 
-## Implemented v1 scope
+## Build & test
 
-### Rust core (`pixelcrusher-core`)
-
-- Format detection: `jpg/jpeg/png/svg/gif`
-- PNG transparent trim
-- Explicit center-anchor crop + resize
-- External optimizer orchestration:
-  - JPEG: `cjpeg` (mozjpeg)
-  - PNG: `pngquant` + `pngcrush`
-  - PNG optional: `zopflipng` / `pngout`
-  - SVG: `svgo`
-  - GIF: `gifsicle`
-- Queue state machine and transitions with statuses:
-  - `queued -> diagnosing -> processing -> optimizing -> completed|failed`
-
-### Frontend UI
-
-- Dark split-pane layout
-- Drop zone and file picker
-- Active queue/progress cards with status
-- Recent results list with size delta and **Reveal** action
-- Options pane:
-  - General: transparent trim
-  - Dimensions: crop/resize
-  - Compression: quality + optional tools
-- Startup diagnostics row (tool availability + source path)
-
-### Icon integration
-
-Icons were regenerated from:
-
-`/Users/bartando/.openclaw/media/inbound/5e8cfff4-b309-45d7-a75a-ecca528811b8.png`
-
-Generated assets include:
-- `src-tauri/icons/icon.icns` (macOS)
-- `src-tauri/icons/icon.ico` (Windows)
-- Linux PNG variants in `src-tauri/icons/linux/`
-
-### Packaging config
-
-Configured in `src-tauri/tauri.conf.json`:
-- macOS: DMG
-- Windows: MSI + NSIS
-- Linux: AppImage + DEB
-
-## Development
-
-```bash
-npm install
-npm run tauri:dev
-```
-
-## Testing
+### Rust tests
 
 ```bash
 cargo test --manifest-path crates/pixelcrusher-core/Cargo.toml
-npm run test
 ```
 
-## Builds
-
-### macOS (native on this host, builds `.app` + `.dmg`)
+### Swift tests
 
 ```bash
-npm run tauri:build:mac
+swift test
 ```
 
-### Windows config present (cross-build requires proper toolchains)
+### macOS release (.app + .dmg)
 
 ```bash
-npm run tauri:build:windows
+bash scripts/build-macos.sh
 ```
 
-### Linux config present (cross-build requires linux target + packaging deps)
+Artifacts are written to:
 
-```bash
-npm run tauri:build:linux
-```
+- `dist/PixelCrusher.app`
+- `dist/PixelCrusher.dmg`
+- `dist/PixelCrusher.zip`
 
-## Host limitations (current machine)
+The DMG includes:
 
-Current host is macOS arm64. Windows/Linux installers are configured but require additional target toolchains and packaging dependencies to actually produce artifacts.
+- `PixelCrusher.app`
+- `/Applications` symlink (drag-and-drop install flow)
 
-## Output location
+## Runtime notes
 
-Built bundles are written under:
+At launch, the app resolves optimizer tools in this order:
 
-`src-tauri/target/release/bundle/`
+1. `PIXELCRUSHER_<TOOL>_PATH` override
+2. Bundled app tools: `PixelCrusher.app/Contents/Resources/BundledTools/bin/*`
+3. Host `PATH`
 
-At runtime, processed files are written to:
+Bundled tools directory override:
 
-`~/Downloads/PixelCrusher/`
+- `PIXELCRUSHER_BUNDLED_TOOLS_DIR`

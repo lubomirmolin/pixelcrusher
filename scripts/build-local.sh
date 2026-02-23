@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 npm run test
 cargo test --manifest-path crates/pixelcrusher-core/Cargo.toml
-npm run tauri:build:mac
+swift test
+bash scripts/build-macos.sh
 
-echo "Build done. Artifacts under src-tauri/target/release/bundle"
+echo "Build done. Artifacts under dist/"
