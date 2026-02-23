@@ -4,6 +4,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{OnceLock, RwLock};
 
 use anyhow::{Context, Result};
 
@@ -12,6 +13,15 @@ use crate::types::{CompressionOptions, ToolStatus};
 
 const REQUIRED_TOOLS: [&str; 5] = ["cjpeg", "pngquant", "pngcrush", "svgo", "gifsicle"];
 const OPTIONAL_TOOLS: [&str; 2] = ["zopflipng", "pngout"];
+
+static RUNTIME_BUNDLED_TOOLS_DIR: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
+
+pub fn set_runtime_bundled_tools_dir(path: Option<PathBuf>) {
+    let lock = RUNTIME_BUNDLED_TOOLS_DIR.get_or_init(|| RwLock::new(None));
+    if let Ok(mut guard) = lock.write() {
+        *guard = path;
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineKind {
@@ -69,12 +79,7 @@ impl ToolResolver {
         let environment: HashMap<String, String> = std::env::vars().collect();
         let search_paths = environment
             .get("PATH")
-            .map(|v| {
-                v.split(':')
-                    .filter(|segment| !segment.trim().is_empty())
-                    .map(PathBuf::from)
-                    .collect::<Vec<_>>()
-            })
+            .map(|v| std::env::split_paths(v).collect::<Vec<_>>())
             .unwrap_or_default();
 
         let bundled_tools_dir = default_bundled_tools_dir(&environment);
@@ -145,12 +150,14 @@ impl ToolResolver {
 
     fn find_bundled(&self, tool_name: &str) -> Option<PathBuf> {
         let root = self.bundled_tools_dir.as_ref()?;
-        let candidate = root.join("bin").join(tool_name);
-        if is_executable(&candidate) {
-            Some(candidate)
-        } else {
-            None
+        for candidate_name in candidate_executable_names(tool_name) {
+            let candidate = root.join("bin").join(candidate_name);
+            if is_executable(&candidate) {
+                return Some(candidate);
+            }
         }
+
+        None
     }
 
     fn find_on_host_path(&self, tool_name: &str) -> Option<PathBuf> {
@@ -159,9 +166,11 @@ impl ToolResolver {
         }
 
         for dir in &self.search_paths {
-            let candidate = dir.join(tool_name);
-            if is_executable(&candidate) {
-                return Some(candidate);
+            for candidate_name in candidate_executable_names(tool_name) {
+                let candidate = dir.join(candidate_name);
+                if is_executable(&candidate) {
+                    return Some(candidate);
+                }
             }
         }
 
@@ -357,6 +366,28 @@ fn run_command(binary: &Path, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+fn candidate_executable_names(tool_name: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        vec![
+            tool_name.to_string(),
+            format!("{tool_name}.exe"),
+            format!("{tool_name}.cmd"),
+            format!("{tool_name}.bat"),
+        ]
+    }
+
+    #[cfg(not(windows))]
+    {
+        vec![tool_name.to_string()]
+    }
+}
+
+fn runtime_bundled_tools_dir_override() -> Option<PathBuf> {
+    let lock = RUNTIME_BUNDLED_TOOLS_DIR.get_or_init(|| RwLock::new(None));
+    lock.read().ok().and_then(|guard| guard.clone())
+}
+
 fn default_bundled_tools_dir(environment: &HashMap<String, String>) -> Option<PathBuf> {
     if let Some(override_dir) = environment.get("PIXELCRUSHER_BUNDLED_TOOLS_DIR")
         && !override_dir.trim().is_empty()
@@ -367,11 +398,32 @@ fn default_bundled_tools_dir(environment: &HashMap<String, String>) -> Option<Pa
         }
     }
 
+    if let Some(override_path) = runtime_bundled_tools_dir_override()
+        && override_path.exists()
+    {
+        return Some(override_path);
+    }
+
     if let Ok(current_exe) = std::env::current_exe() {
         if let Some(parent) = current_exe.parent() {
-            let candidate = parent.join("../Resources/BundledTools");
-            if candidate.exists() {
-                return Some(candidate);
+            let mut candidates = vec![
+                parent.join("../Resources/BundledTools"),
+                parent.join("resources/BundledTools"),
+            ];
+
+            if let Some(executable_stem) = current_exe.file_stem().and_then(|s| s.to_str()) {
+                candidates.push(
+                    parent
+                        .join("../lib")
+                        .join(executable_stem)
+                        .join("resources/BundledTools"),
+                );
+            }
+
+            for candidate in candidates {
+                if candidate.exists() {
+                    return Some(candidate);
+                }
             }
         }
     }
@@ -452,6 +504,40 @@ mod tests {
     }
 
     #[test]
+    fn resolver_falls_back_to_host_path_when_bundled_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let host_bin = temp.path().join("host/bin");
+        fs::create_dir_all(&host_bin).unwrap();
+
+        let tool_name = "pixelcrusher-host-test-tool";
+        let host_tool = host_bin.join(tool_name);
+        make_executable(&host_tool);
+
+        let resolver = ToolResolver::new(HashMap::new(), vec![host_bin], None);
+
+        let resolved = resolver.resolve_named(tool_name).unwrap();
+        assert_eq!(resolved.executable, host_tool);
+        assert_eq!(resolved.source, ToolResolutionSource::HostPath);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolver_finds_windows_bundled_exe() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundled_bin = temp.path().join("bundled/bin");
+        fs::create_dir_all(&bundled_bin).unwrap();
+
+        let bundled_tool = bundled_bin.join("pngquant.exe");
+        make_executable(&bundled_tool);
+
+        let resolver = ToolResolver::new(HashMap::new(), vec![], Some(temp.path().join("bundled")));
+
+        let resolved = resolver.resolve_named("pngquant").unwrap();
+        assert_eq!(resolved.executable, bundled_tool);
+        assert_eq!(resolved.source, ToolResolutionSource::Bundled);
+    }
+
+    #[test]
     fn resolver_prefers_env_override_highest() {
         let temp = tempfile::tempdir().unwrap();
         let bundled_bin = temp.path().join("bundled/bin");
@@ -506,7 +592,9 @@ mod tests {
         let fake_pngcrush = temp.path().join("fake-pngcrush");
 
         let image = RgbaImage::from_pixel(2, 2, Rgba([255, 0, 0, 255]));
-        image.save_with_format(&input_png, ImageFormat::Png).unwrap();
+        image
+            .save_with_format(&input_png, ImageFormat::Png)
+            .unwrap();
 
         fs::write(
             &fake_pngcrush,
@@ -559,7 +647,8 @@ cp \"$2\" \"$3\"
         compression.run_zopfli = false;
         compression.run_pngout = false;
 
-        let stages = optimize_asset(AssetFormat::Png, &input_png, &output_png, &compression).unwrap();
+        let stages =
+            optimize_asset(AssetFormat::Png, &input_png, &output_png, &compression).unwrap();
 
         match previous {
             Some(value) => unsafe {

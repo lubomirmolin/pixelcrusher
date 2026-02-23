@@ -68,8 +68,19 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Prepare bundled optimizer toolchain (Linux)
+        run: npm run bundled-tools:prepare
+
       - name: Build Linux bundles
         run: npm run tauri:build:linux
+
+      - name: Verify bundled tools in Linux bundle output
+        run: npm run bundled-tools:check:linux
+
+      - name: Print Linux artifact sizes
+        run: |
+          find src-tauri/target/x86_64-unknown-linux-gnu/release/bundle -type f \( -name '*.AppImage' -o -name '*.deb' \) -print0 | xargs -0 ls -lh
+          cat dist/bundle-evidence/bundled-tools-linux.txt
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
@@ -78,6 +89,7 @@ jobs:
           path: |
             src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/**/*.AppImage
             src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/**/*.deb
+            dist/bundle-evidence/bundled-tools-linux.txt
 
   windows-tauri:
     name: Windows Tauri bundles (.msi/.exe)
@@ -99,8 +111,22 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Prepare bundled optimizer toolchain (Windows)
+        run: npm run bundled-tools:prepare
+
       - name: Build Windows bundles
         run: npm run tauri:build:windows
+
+      - name: Verify bundled tools in Windows bundle output
+        run: npm run bundled-tools:check:windows
+
+      - name: Print Windows artifact sizes
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path src-tauri/target/x86_64-pc-windows-msvc/release/bundle -Recurse -Include *.msi,*.exe |
+            Select-Object FullName, Length |
+            Format-Table -AutoSize
+          Get-Content dist/bundle-evidence/bundled-tools-windows.txt
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -109,3 +135,4 @@ jobs:
           path: |
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.msi
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.exe
+            dist/bundle-evidence/bundled-tools-windows.txt

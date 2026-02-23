@@ -15,6 +15,9 @@
     "tauri:build:app": "tauri build --bundles app",
     "build:mac": "bash scripts/build-macos.sh",
     "tauri:build:mac": "bash scripts/build-macos.sh",
+    "bundled-tools:prepare": "node scripts/prepare_tauri_bundled_tools.cjs",
+    "bundled-tools:check:linux": "node scripts/check_tauri_bundle_tools.cjs --platform linux",
+    "bundled-tools:check:windows": "node scripts/check_tauri_bundle_tools.cjs --platform windows",
     "tauri:build:linux": "tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb",
     "tauri:build:windows": "tauri build --target x86_64-pc-windows-msvc --bundles msi,nsis"
   },
@@ -33,10 +36,15 @@
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
+    "gifsicle": "^7.0.1",
     "globals": "^16.5.0",
+    "mozjpeg": "^8.0.0",
+    "pngcrush-bin": "^7.0.0",
+    "pngquant-bin": "^9.0.0",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.48.0",
     "vite": "^7.3.1",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "zopflipng-bin": "^7.1.0"
   }
 }

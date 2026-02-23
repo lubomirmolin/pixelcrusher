@@ -14,6 +14,7 @@ type ToolStatus = {
   name: string;
   available: boolean;
   source?: string | null;
+  source_kind?: string | null;
 };
 
 function App() {
@@ -55,6 +56,20 @@ function App() {
         .sort((a, b) => b.progress - a.progress),
     [queueState.jobs],
   );
+
+  const bundledDiagnosticsSummary = useMemo(() => {
+    const required = ['cjpeg', 'pngquant', 'pngcrush', 'svgo', 'gifsicle'];
+    const requiredStatuses = required.map((name) => diagnostics.find((tool) => tool.name === name));
+    const bundledReadyCount = requiredStatuses.filter(
+      (tool) => tool?.available && tool.source_kind === 'bundled',
+    ).length;
+
+    return {
+      total: required.length,
+      ready: bundledReadyCount,
+      allReady: bundledReadyCount === required.length,
+    };
+  }, [diagnostics]);
 
   const optionsPayload = useMemo(
     () => ({
@@ -104,10 +119,21 @@ function App() {
   return (
     <div className="app-shell">
       <header className="diagnostics-row">
+        <div className={`diag-pill ${bundledDiagnosticsSummary.allReady ? 'ok' : 'missing'}`}>
+          <span>bundled toolchain</span>
+          <small>
+            {bundledDiagnosticsSummary.ready}/{bundledDiagnosticsSummary.total} bundled-ready
+          </small>
+        </div>
+
         {diagnostics.map((tool) => (
           <div key={tool.name} className={`diag-pill ${tool.available ? 'ok' : 'missing'}`}>
             <span>{tool.name}</span>
-            <small>{tool.available ? tool.source ?? 'PATH' : 'missing'}</small>
+            <small>
+              {tool.available
+                ? `${tool.source_kind ?? 'unknown'} · ${tool.source ?? 'PATH'}`
+                : 'missing'}
+            </small>
           </div>
         ))}
       </header>
