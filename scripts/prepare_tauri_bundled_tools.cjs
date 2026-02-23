@@ -178,13 +178,20 @@ async function installSvgoRuntime(tmpDir, runtime) {
     JSON.stringify(packageJson, null, 2),
   );
 
-  run(runtime.nodeExecutable, [runtime.npmCliPath, 'install', '--omit=dev', '--ignore-scripts', '--silent'], {
-    cwd: svgoRuntimeDir,
-  });
+  run(
+    runtime.nodeExecutable,
+    [runtime.npmCliPath, 'install', '--omit=dev', '--ignore-scripts', '--no-audit', '--fund=false'],
+    {
+      cwd: svgoRuntimeDir,
+    },
+  );
 
   await fsp.cp(path.join(svgoRuntimeDir, 'node_modules'), NODE_MODULES_DIR, {
     recursive: true,
+    dereference: true,
   });
+
+  await fsp.rm(path.join(NODE_MODULES_DIR, '.bin'), { recursive: true, force: true });
 }
 
 function writeSvgoWrapper() {
