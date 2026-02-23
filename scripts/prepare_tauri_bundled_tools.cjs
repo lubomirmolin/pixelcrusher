@@ -205,12 +205,90 @@ function writeSvgoWrapper() {
   return wrapperPath;
 }
 
-function resolveOptional(moduleName) {
-  try {
-    return require(moduleName);
-  } catch (_) {
+function normalizeModuleExport(value) {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (typeof value === 'function') {
+    try {
+      const maybePath = value();
+      if (typeof maybePath === 'string') {
+        return maybePath;
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+
+  if (!value || typeof value !== 'object') {
     return null;
   }
+
+  if (typeof value.default === 'string') {
+    return value.default;
+  }
+
+  if (typeof value.default === 'function') {
+    try {
+      const maybePath = value.default();
+      if (typeof maybePath === 'string') {
+        return maybePath;
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+
+  if (typeof value.path === 'string') {
+    return value.path;
+  }
+
+  if (typeof value.path === 'function') {
+    try {
+      const maybePath = value.path();
+      if (typeof maybePath === 'string') {
+        return maybePath;
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+async function resolveModuleBinary(moduleName, optional = false) {
+  const attempts = [];
+
+  try {
+    attempts.push(require(moduleName));
+  } catch (error) {
+    if (!['ERR_REQUIRE_ESM', 'ERR_PACKAGE_PATH_NOT_EXPORTED'].includes(error.code)) {
+      if (!optional) {
+        throw error;
+      }
+    }
+  }
+
+  try {
+    attempts.push(await import(moduleName));
+  } catch (_) {
+    // ignore import failure when optional
+  }
+
+  for (const candidate of attempts) {
+    const normalized = normalizeModuleExport(candidate);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  if (optional) {
+    return null;
+  }
+
+  throw new Error(`Unable to resolve executable path from module: ${moduleName}`);
 }
 
 async function main() {
@@ -232,7 +310,7 @@ async function main() {
   const copied = [];
 
   for (const binary of binaries) {
-    const sourcePath = require(binary.moduleName);
+    const sourcePath = await resolveModuleBinary(binary.moduleName);
     if (!sourcePath || !fs.existsSync(sourcePath)) {
       throw new Error(`Unable to resolve ${binary.name} from ${binary.moduleName}`);
     }
@@ -241,7 +319,7 @@ async function main() {
     copied.push({ name: binary.name, path: copiedPath });
   }
 
-  const zopflipngPath = resolveOptional('zopflipng-bin');
+  const zopflipngPath = await resolveModuleBinary('zopflipng-bin', true);
   if (zopflipngPath && fs.existsSync(zopflipngPath)) {
     const copiedPath = copyExecutable(zopflipngPath, 'zopflipng');
     copied.push({ name: 'zopflipng', path: copiedPath });
