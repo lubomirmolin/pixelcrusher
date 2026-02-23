@@ -249,10 +249,11 @@ pub fn optimize_asset(
             if compression.run_pngcrush
                 && let Some(pngcrush) = resolver.resolve_named("pngcrush")
             {
-                run_command(
-                    &pngcrush.executable,
-                    &["-ow", "-brute", output_path.to_string_lossy().as_ref()],
-                )?;
+                let tmp = swap_extension(output_path, "pngcrush.png");
+                let args = pngcrush_args(output_path, &tmp);
+                let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                run_command(&pngcrush.executable, &arg_refs)?;
+                fs::rename(&tmp, output_path)?;
                 stages.push("pngcrush".to_string());
             }
 
@@ -331,6 +332,14 @@ pub fn optimize_asset(
     Ok(stages)
 }
 
+fn pngcrush_args(input_path: &Path, output_path: &Path) -> Vec<String> {
+    vec![
+        "-brute".to_string(),
+        input_path.to_string_lossy().to_string(),
+        output_path.to_string_lossy().to_string(),
+    ]
+}
+
 fn run_command(binary: &Path, args: &[&str]) -> Result<()> {
     let output = Command::new(binary)
         .args(args)
@@ -403,6 +412,8 @@ fn swap_extension(path: &Path, suffix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::{ImageFormat, Rgba, RgbaImage};
+    use std::sync::{Mutex, OnceLock};
 
     #[test]
     fn pipeline_selection_is_correct() {
@@ -467,6 +478,107 @@ mod tests {
         let resolved = resolver.resolve_named("gifsicle").unwrap();
         assert_eq!(resolved.executable, override_tool);
         assert_eq!(resolved.source, ToolResolutionSource::EnvironmentOverride);
+    }
+
+    #[test]
+    fn pngcrush_builder_uses_explicit_output_destination() {
+        let input = Path::new("/tmp/in.png");
+        let output = Path::new("/tmp/out.png");
+
+        let args = pngcrush_args(input, output);
+
+        assert_eq!(args[0], "-brute");
+        assert_eq!(args[1], "/tmp/in.png");
+        assert_eq!(args[2], "/tmp/out.png");
+        let output_name = Path::new(&args[2])
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap();
+        assert_ne!(output_name, "pngout.png");
+    }
+
+    #[test]
+    fn png_pipeline_with_pngcrush_stage_writes_explicit_output_and_succeeds() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let input_png = temp.path().join("input.png");
+        let output_png = temp.path().join("output.png");
+        let fake_pngcrush = temp.path().join("fake-pngcrush");
+
+        let image = RgbaImage::from_pixel(2, 2, Rgba([255, 0, 0, 255]));
+        image.save_with_format(&input_png, ImageFormat::Png).unwrap();
+
+        fs::write(
+            &fake_pngcrush,
+            format!(
+                "#!/bin/sh
+set -eu
+last=\"\"
+for arg in \"$@\"; do
+  last=\"$arg\"
+done
+if [ \"$last\" = \"pngout.png\" ] || [ \"$(basename \"$last\")\" = \"pngout.png\" ]; then
+  echo \"unexpected default pngout target\" >&2
+  exit 1
+fi
+if [ \"$#\" -ne 3 ]; then
+  echo \"unexpected arg count: $#\" >&2
+  exit 1
+fi
+if [ \"$1\" != \"-brute\" ]; then
+  echo \"missing -brute\" >&2
+  exit 1
+fi
+if [ \"$3\" != \"{}\" ]; then
+  echo \"unexpected output path: $3\" >&2
+  exit 1
+fi
+cp \"$2\" \"$3\"
+",
+                swap_extension(&output_png, "pngcrush.png").display(),
+            ),
+        )
+        .unwrap();
+
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&fake_pngcrush).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&fake_pngcrush, perms).unwrap();
+        }
+
+        let env_lock = env_lock().lock().unwrap();
+        let previous = std::env::var("PIXELCRUSHER_PNGCRUSH_PATH").ok();
+        unsafe {
+            std::env::set_var("PIXELCRUSHER_PNGCRUSH_PATH", &fake_pngcrush);
+        }
+
+        let mut compression = CompressionOptions::default();
+        compression.run_png_quant = false;
+        compression.run_pngcrush = true;
+        compression.run_zopfli = false;
+        compression.run_pngout = false;
+
+        let stages = optimize_asset(AssetFormat::Png, &input_png, &output_png, &compression).unwrap();
+
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var("PIXELCRUSHER_PNGCRUSH_PATH", value);
+            },
+            None => unsafe {
+                std::env::remove_var("PIXELCRUSHER_PNGCRUSH_PATH");
+            },
+        }
+        drop(env_lock);
+
+        assert_eq!(stages, vec!["pngcrush".to_string()]);
+        assert!(output_png.exists());
+        assert!(fs::metadata(&output_png).unwrap().len() > 0);
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     fn make_executable(path: &Path) {

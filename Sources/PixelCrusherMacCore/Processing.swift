@@ -104,7 +104,7 @@ public struct PixelCrusherBackendClient: Sendable {
     private let cliExecutableURL: URL?
     private let environment: [String: String]
     private let bundledToolsDirectory: URL?
-    private let outputDirectory: URL
+    private let outputDirectoryOverride: URL?
 
     public init(
         cliExecutableURL: URL? = nil,
@@ -116,7 +116,7 @@ public struct PixelCrusherBackendClient: Sendable {
         self.environment = environment
         self.cliExecutableURL = cliExecutableURL ?? Self.defaultCLIExecutable(environment: environment, bundle: bundle)
         self.bundledToolsDirectory = bundledToolsDirectory ?? OptimizerToolDetector.defaultBundledToolsDirectory(bundle: bundle)
-        self.outputDirectory = outputDirectory ?? Self.defaultOutputDirectory(environment: environment)
+        self.outputDirectoryOverride = outputDirectory ?? Self.outputDirectoryOverride(environment: environment)
     }
 
     public func detectTools() throws -> [OptimizerToolStatus] {
@@ -179,7 +179,7 @@ public struct PixelCrusherBackendClient: Sendable {
 
         let request = CLIProcessRequest(
             inputPath: inputURL.path,
-            outputDir: outputDirectory.path,
+            outputDir: Self.defaultOutputDirectory(for: inputURL, environment: environment, explicitOverride: outputDirectoryOverride).path,
             options: CLIProcessOptions(from: options)
         )
 
@@ -369,15 +369,34 @@ public struct PixelCrusherBackendClient: Sendable {
         return nil
     }
 
-    public static func defaultOutputDirectory(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
-        if let override = environment["PIXELCRUSHER_OUTPUT_DIR"], !override.isEmpty {
-            return URL(fileURLWithPath: override)
+    public static func defaultOutputDirectory(
+        for inputURL: URL,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        defaultOutputDirectory(for: inputURL, environment: environment, explicitOverride: nil)
+    }
+
+    static func outputDirectoryOverride(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL? {
+        guard let override = environment["PIXELCRUSHER_OUTPUT_DIR"], !override.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: override)
+    }
+
+    private static func defaultOutputDirectory(
+        for inputURL: URL,
+        environment: [String: String],
+        explicitOverride: URL?
+    ) -> URL {
+        if let explicitOverride {
+            return explicitOverride
         }
 
-        let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
+        if let override = outputDirectoryOverride(environment: environment) {
+            return override
+        }
 
-        return downloads.appendingPathComponent("PixelCrusher", isDirectory: true)
+        return inputURL.deletingLastPathComponent()
     }
 
     private static func mapState(_ state: String) -> ProcessingItemState {

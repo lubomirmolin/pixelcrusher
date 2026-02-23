@@ -20,6 +20,23 @@ final class StateCollector: @unchecked Sendable {
 }
 
 struct BackendInvocationTests {
+    @Test("Default output directory resolves to input parent path")
+    func defaultOutputDirectoryUsesInputParentByDefault() {
+        let input = URL(fileURLWithPath: "/path/to/file.png")
+        let resolved = PixelCrusherBackendClient.defaultOutputDirectory(for: input, environment: [:])
+        #expect(resolved.path == "/path/to")
+    }
+
+    @Test("PIXELCRUSHER_OUTPUT_DIR override is honored")
+    func outputDirectoryOverrideIsHonored() {
+        let input = URL(fileURLWithPath: "/path/to/file.png")
+        let resolved = PixelCrusherBackendClient.defaultOutputDirectory(
+            for: input,
+            environment: ["PIXELCRUSHER_OUTPUT_DIR": "/custom/output"]
+        )
+        #expect(resolved.path == "/custom/output")
+    }
+
     @Test("Backend client parses status and result JSON lines from CLI")
     func parsesProcessStream() throws {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("pixelcrusher-backend-process-\(UUID().uuidString)", isDirectory: true)

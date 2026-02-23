@@ -131,8 +131,10 @@ public struct ProcessingQueueStateMachine: Sendable {
              (.queued, .failed),
              (.preparing, .optimizing),
              (.preparing, .saving),
+             (.preparing, .done),
              (.preparing, .failed),
              (.optimizing, .saving),
+             (.optimizing, .done),
              (.optimizing, .failed),
              (.saving, .done),
              (.saving, .failed):
