@@ -465,7 +465,9 @@ public struct GitHubInAppUpdater: Sendable {
             return url.path.contains("/\(owner)/\(repo)/releases/download/")
         }
 
-        if host == "objects.githubusercontent.com" || host == "github-releases.githubusercontent.com" {
+        if host == "objects.githubusercontent.com"
+            || host == "github-releases.githubusercontent.com"
+            || host == "release-assets.githubusercontent.com" {
             return true
         }
 
