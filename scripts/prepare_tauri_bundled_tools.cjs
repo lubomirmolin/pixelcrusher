@@ -17,10 +17,6 @@ const NODE_VERSION = process.env.PIXELCRUSHER_BUNDLED_NODE_VERSION || 'v22.14.0'
 
 const REQUIRED_TOOLS = ['cjpeg', 'pngquant', 'pngcrush', 'svgo', 'gifsicle'];
 
-function npmCommand() {
-  return process.platform === 'win32' ? 'npm.cmd' : 'npm';
-}
-
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     stdio: 'inherit',
@@ -147,9 +143,24 @@ async function installNodeRuntime(tmpDir) {
   if (process.platform !== 'win32') {
     fs.chmodSync(destinationBinary, 0o755);
   }
+
+  const runtimeRoot = path.dirname(sourceBinary);
+  const npmCliCandidates = [
+    path.join(runtimeRoot, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    path.join(runtimeRoot, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ];
+  const npmCliPath = npmCliCandidates.find((candidate) => fs.existsSync(candidate));
+  if (!npmCliPath) {
+    throw new Error(`npm-cli.js not found in downloaded Node runtime: ${npmCliCandidates.join(', ')}`);
+  }
+
+  return {
+    nodeExecutable: sourceBinary,
+    npmCliPath,
+  };
 }
 
-async function installSvgoRuntime(tmpDir) {
+async function installSvgoRuntime(tmpDir, runtime) {
   const svgoRuntimeDir = path.join(tmpDir, 'svgo-runtime');
   await fsp.mkdir(svgoRuntimeDir, { recursive: true });
 
@@ -167,7 +178,7 @@ async function installSvgoRuntime(tmpDir) {
     JSON.stringify(packageJson, null, 2),
   );
 
-  run(npmCommand(), ['install', '--omit=dev', '--ignore-scripts', '--silent'], {
+  run(runtime.nodeExecutable, [runtime.npmCliPath, 'install', '--omit=dev', '--ignore-scripts', '--silent'], {
     cwd: svgoRuntimeDir,
   });
 
@@ -327,8 +338,8 @@ async function main() {
 
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'pixelcrusher-bundled-tools-'));
   try {
-    await installNodeRuntime(tmpDir);
-    await installSvgoRuntime(tmpDir);
+    const runtime = await installNodeRuntime(tmpDir);
+    await installSvgoRuntime(tmpDir, runtime);
   } finally {
     await fsp.rm(tmpDir, { recursive: true, force: true });
   }
