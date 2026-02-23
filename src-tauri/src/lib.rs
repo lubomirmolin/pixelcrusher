@@ -324,8 +324,31 @@ pub fn run() {
 
             std::fs::create_dir_all(&base_output).ok();
 
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                let bundled_tools_dir = resource_dir.join("BundledTools");
+                if bundled_tools_dir.exists() {
+                    pixelcrusher_core::optimizer::set_runtime_bundled_tools_dir(Some(
+                        bundled_tools_dir,
+                    ));
+                }
+            }
+
+            let diagnostics = pixelcrusher_core::optimizer::diagnostics();
+
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            {
+                let ready_count = diagnostics
+                    .iter()
+                    .filter(|tool| tool.available && tool.source_kind.as_deref() == Some("bundled"))
+                    .count();
+                log::info!(
+                    "Bundled optimizer diagnostics: bundled-ready {ready_count}/{} tools",
+                    diagnostics.len()
+                );
+            }
+
             let state = RuntimeState {
-                diagnostics: pixelcrusher_core::optimizer::diagnostics(),
+                diagnostics,
                 output_dir: base_output,
                 ..Default::default()
             };

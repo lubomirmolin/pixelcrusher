@@ -13,6 +13,8 @@ dist
 crates/pixelcrusher-core/target
 dist-ssr
 *.local
+src-tauri/resources/BundledTools/*
+!src-tauri/resources/BundledTools/.gitkeep
 
 # Editor directories and files
 .vscode/*
