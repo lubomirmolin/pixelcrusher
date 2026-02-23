@@ -87,8 +87,14 @@ Behavior:
 
 - User-initiated only (no background auto-update daemon)
 - Checks GitHub API `repos/lubomirmolin/pixelcrusher/releases/latest`
-- Compares semantic versions (`vX.Y.Z` tags supported)
+- Compares semantic versions (`vX.Y.Z` tags supported) and only treats updates as available when `latest > current`
+- When versions are equal, UI shows `You're up to date (x.y.z).` and no install action is offered
 - Prefers macOS `.zip` release asset for in-place update (falls back to `.dmg`)
+- Enforces SHA-256 verification before install:
+  - Uses release asset metadata digest when present (`sha256:<hex>`)
+  - If metadata digest is missing, attempts companion checksum files (`<asset>.sha256`, then `<asset-without-extension>.sha256`)
+  - If no valid checksum is found, install is aborted with a clear verification error
+  - If checksum mismatches downloaded bytes, install is aborted
 - Downloads update, validates app bundle identifier, stages install, swaps app in `/Applications`, then relaunches
 - Uses a helper script launched by the app, so the running app never overwrites itself
 - Performs backup + rollback during swap if install move fails

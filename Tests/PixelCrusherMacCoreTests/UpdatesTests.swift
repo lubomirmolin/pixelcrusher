@@ -51,6 +51,48 @@ struct UpdatesTests {
         #expect(release.preferredAssetURL(for: .macOS)?.absoluteString == "https://example.com/PixelCrusher.zip")
     }
 
+    @Test("Equal current and latest versions are treated as up-to-date")
+    func equalVersionIsNotUpdateAvailable() {
+        let release = GitHubRelease(
+            tagName: "v0.1.2",
+            name: "PixelCrusher 0.1.2",
+            body: nil,
+            htmlURL: URL(string: "https://github.com/lubomirmolin/pixelcrusher/releases/tag/v0.1.2")!,
+            assets: []
+        )
+
+        let result = UpdateCheckResult(
+            currentVersion: SemanticVersion(parsing: "0.1.2")!,
+            latestVersion: SemanticVersion(parsing: "0.1.2")!,
+            release: release,
+            preferredAsset: nil,
+            downloadURL: release.htmlURL
+        )
+
+        #expect(result.isUpdateAvailable == false)
+    }
+
+    @Test("Latest version strictly greater than current is update-available")
+    func newerVersionIsUpdateAvailable() {
+        let release = GitHubRelease(
+            tagName: "v0.1.3",
+            name: "PixelCrusher 0.1.3",
+            body: nil,
+            htmlURL: URL(string: "https://github.com/lubomirmolin/pixelcrusher/releases/tag/v0.1.3")!,
+            assets: []
+        )
+
+        let result = UpdateCheckResult(
+            currentVersion: SemanticVersion(parsing: "0.1.2")!,
+            latestVersion: SemanticVersion(parsing: "0.1.3")!,
+            release: release,
+            preferredAsset: nil,
+            downloadURL: release.htmlURL
+        )
+
+        #expect(result.isUpdateAvailable == true)
+    }
+
     @Test("Token resolver checks env first then defaults")
     func tokenResolverPriority() {
         let defaults = UserDefaults(suiteName: "UpdatesTests-\(UUID().uuidString)")!

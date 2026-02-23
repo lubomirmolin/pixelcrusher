@@ -349,7 +349,10 @@ public enum InAppUpdaterError: LocalizedError {
     case unsupportedAsset(name: String)
     case untrustedAssetURL(URL)
     case downloadFailed(String)
+    case missingDigest(assetName: String)
+    case invalidDigestFormat(source: String)
     case digestMismatch(expected: String, actual: String)
+    case digestFetchFailed(String)
     case destinationNotWritable(path: String)
     case helperLaunchFailed(String)
 
@@ -365,8 +368,14 @@ public enum InAppUpdaterError: LocalizedError {
             return "Refusing to download update from untrusted URL: \(url.absoluteString)"
         case .downloadFailed(let message):
             return "Failed to download update asset: \(message)"
-        case .digestMismatch(let expected, let actual):
-            return "Downloaded update checksum mismatch (expected \(expected), got \(actual))."
+        case .missingDigest(let assetName):
+            return "Update verification failed: \(assetName) has no SHA-256 digest metadata and no companion .sha256 checksum file was found."
+        case .invalidDigestFormat(let source):
+            return "Update verification failed: could not parse a SHA-256 checksum from \(source)."
+        case .digestMismatch:
+            return "Update verification failed: downloaded checksum does not match expected SHA-256."
+        case .digestFetchFailed(let message):
+            return "Failed to fetch release checksum: \(message)"
         case .destinationNotWritable(let path):
             return "Cannot write to \(path). Move PixelCrusher to ~/Applications or update manually."
         case .helperLaunchFailed(let message):
@@ -436,7 +445,7 @@ public struct GitHubInAppUpdater: Sendable {
             progress?(.downloading(fraction))
         }
 
-        try verifyDigestIfPresent(asset: asset, downloadedAssetURL: downloadedAssetURL)
+        try await verifyDownloadedAssetDigest(asset: asset, downloadedAssetURL: downloadedAssetURL)
 
         progress?(.installing)
 
@@ -570,18 +579,140 @@ public struct GitHubInAppUpdater: Sendable {
         }
     }
 
-    private func verifyDigestIfPresent(asset: GitHubReleaseAsset, downloadedAssetURL: URL) throws {
-        guard let digest = asset.digest?.trimmingCharacters(in: .whitespacesAndNewlines),
-              digest.lowercased().hasPrefix("sha256:") else {
-            return
-        }
-
-        let expected = String(digest.dropFirst("sha256:".count)).lowercased()
+    func verifyDownloadedAssetDigest(asset: GitHubReleaseAsset, downloadedAssetURL: URL) async throws {
+        let expected = try await resolveExpectedDigest(for: asset)
         let data = try Data(contentsOf: downloadedAssetURL)
         let actual = SHA256.hash(data: data).hexString
 
         guard actual == expected else {
             throw InAppUpdaterError.digestMismatch(expected: expected, actual: actual)
+        }
+    }
+
+    private func resolveExpectedDigest(for asset: GitHubReleaseAsset) async throws -> String {
+        if let digest = try Self.parseMetadataDigest(asset.digest, assetName: asset.name) {
+            return digest
+        }
+
+        if let companionDigest = try await fetchCompanionDigest(for: asset) {
+            return companionDigest
+        }
+
+        throw InAppUpdaterError.missingDigest(assetName: asset.name)
+    }
+
+    private func fetchCompanionDigest(for asset: GitHubReleaseAsset) async throws -> String? {
+        let digestURLs = Self.digestCompanionURLs(for: asset.browserDownloadURL)
+
+        for digestURL in digestURLs {
+            guard Self.isTrustedReleaseAssetURL(digestURL, owner: configuration.owner, repo: configuration.repo) else {
+                continue
+            }
+
+            var request = URLRequest(url: digestURL)
+            request.setValue("text/plain,application/octet-stream;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+            request.setValue("PixelCrusher-InAppUpdater", forHTTPHeaderField: "User-Agent")
+            if let token = configuration.authToken, !token.isEmpty {
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            }
+
+            do {
+                let (data, response) = try await session.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    throw InAppUpdaterError.digestFetchFailed("Invalid HTTP response")
+                }
+
+                if let responseURL = http.url,
+                   !Self.isTrustedReleaseAssetURL(responseURL, owner: configuration.owner, repo: configuration.repo) {
+                    throw InAppUpdaterError.untrustedAssetURL(responseURL)
+                }
+
+                if http.statusCode == 404 {
+                    continue
+                }
+
+                guard (200..<300).contains(http.statusCode) else {
+                    throw InAppUpdaterError.digestFetchFailed("HTTP \(http.statusCode)")
+                }
+
+                let source = digestURL.lastPathComponent
+                return try Self.parseCompanionDigest(data: data, source: source)
+            } catch let error as InAppUpdaterError {
+                throw error
+            } catch {
+                throw InAppUpdaterError.digestFetchFailed(error.localizedDescription)
+            }
+        }
+
+        return nil
+    }
+
+    private static func parseMetadataDigest(_ rawDigest: String?, assetName: String) throws -> String? {
+        guard let rawDigest = rawDigest?.trimmingCharacters(in: .whitespacesAndNewlines), !rawDigest.isEmpty else {
+            return nil
+        }
+
+        let lowered = rawDigest.lowercased()
+        guard lowered.hasPrefix("sha256:") else {
+            throw InAppUpdaterError.invalidDigestFormat(source: "release metadata for \(assetName)")
+        }
+
+        let expected = String(lowered.dropFirst("sha256:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isSHA256Hex(expected) else {
+            throw InAppUpdaterError.invalidDigestFormat(source: "release metadata for \(assetName)")
+        }
+
+        return expected
+    }
+
+    private static func parseCompanionDigest(data: Data, source: String) throws -> String {
+        guard let text = String(data: data, encoding: .utf8),
+              let digest = extractSHA256Hex(from: text) else {
+            throw InAppUpdaterError.invalidDigestFormat(source: source)
+        }
+
+        return digest
+    }
+
+    private static func digestCompanionURLs(for assetURL: URL) -> [URL] {
+        var candidates: [URL] = [assetURL.appendingPathExtension("sha256")]
+
+        let withoutExtension = assetURL.deletingPathExtension()
+        if withoutExtension != assetURL {
+            candidates.append(withoutExtension.appendingPathExtension("sha256"))
+        }
+
+        var deduped: [URL] = []
+        var seen: Set<String> = []
+        for candidate in candidates {
+            let key = candidate.absoluteString
+            if seen.insert(key).inserted {
+                deduped.append(candidate)
+            }
+        }
+
+        return deduped
+    }
+
+    private static func extractSHA256Hex(from text: String) -> String? {
+        let pattern = #"(?i)\b[0-9a-f]{64}\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return nil
+        }
+
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, options: [], range: range),
+              let digestRange = Range(match.range, in: text) else {
+            return nil
+        }
+
+        return text[digestRange].lowercased()
+    }
+
+    private static func isSHA256Hex(_ value: String) -> Bool {
+        guard value.count == 64 else { return false }
+        return value.allSatisfy { character in
+            character.isHexDigit
         }
     }
 }

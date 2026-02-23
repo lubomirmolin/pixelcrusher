@@ -45,7 +45,8 @@ final class UpdateCheckViewModel: ObservableObject {
 
     var canInstall: Bool {
         if case .updateAvailable = state {
-            return latestCheckResult?.preferredAsset != nil
+            return latestCheckResult?.isUpdateAvailable == true
+                && latestCheckResult?.preferredAsset != nil
         }
         return false
     }
