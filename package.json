@@ -19,7 +19,8 @@
     "bundled-tools:check:linux": "node scripts/check_tauri_bundle_tools.cjs --platform linux",
     "bundled-tools:check:windows": "node scripts/check_tauri_bundle_tools.cjs --platform windows",
     "tauri:build:linux": "tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb",
-    "tauri:build:windows": "tauri build --target x86_64-pc-windows-msvc --bundles msi,nsis"
+    "tauri:build:windows": "tauri build --target x86_64-pc-windows-msvc --bundles msi,nsis",
+    "version:check": "node scripts/version_sync.cjs --check"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",

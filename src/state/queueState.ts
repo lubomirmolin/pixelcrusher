@@ -26,17 +26,21 @@ export type QueueEventPayload = {
 export type QueueState = {
   jobs: Record<string, JobSnapshot>;
   recent: JobResultEntry[];
+  lastError: string | null;
 };
 
 export const initialQueueState: QueueState = {
   jobs: {},
   recent: [],
+  lastError: null,
 };
 
 type QueueAction =
   | { type: 'UPSERT_JOB'; payload: JobSnapshot }
   | { type: 'INGEST_EVENT'; payload: QueueEventPayload }
-  | { type: 'SET_RECENT'; payload: JobResultEntry[] };
+  | { type: 'SET_RECENT'; payload: JobResultEntry[] }
+  | { type: 'QUEUE_ERROR'; payload: string }
+  | { type: 'CLEAR_QUEUE_ERROR' };
 
 export function queueReducer(state: QueueState, action: QueueAction): QueueState {
   switch (action.type) {
@@ -49,12 +53,17 @@ export function queueReducer(state: QueueState, action: QueueAction): QueueState
         },
       };
     case 'INGEST_EVENT': {
+      const isFailure = action.payload.job.status === 'failed';
+
       const next = {
         ...state,
         jobs: {
           ...state.jobs,
           [action.payload.job.id]: action.payload.job,
         },
+        lastError: isFailure
+          ? action.payload.job.message || `Processing failed for ${action.payload.job.input_path}`
+          : state.lastError,
       };
 
       if (!action.payload.result) {
@@ -71,6 +80,16 @@ export function queueReducer(state: QueueState, action: QueueAction): QueueState
       return {
         ...state,
         recent: action.payload,
+      };
+    case 'QUEUE_ERROR':
+      return {
+        ...state,
+        lastError: action.payload,
+      };
+    case 'CLEAR_QUEUE_ERROR':
+      return {
+        ...state,
+        lastError: null,
       };
     default:
       return state;

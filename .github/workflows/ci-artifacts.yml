@@ -30,22 +30,35 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Resolve package version
+        id: version
+        run: |
+          VERSION="$(node -e 'const fs=require("node:fs");const pkg=JSON.parse(fs.readFileSync("package.json","utf8"));process.stdout.write(pkg.version);')"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Version consistency check
+        run: npm run version:check
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build native macOS artifacts
+        env:
+          PIXELCRUSHER_VERSION: ${{ steps.version.outputs.version }}
         run: bash scripts/build-macos.sh
 
-      - name: Verify updater asset (macOS ZIP)
-        run: test -f dist/PixelCrusher.zip
+      - name: Verify updater + versioned macOS assets
+        run: |
+          test -f "dist/PixelCrusher-${{ steps.version.outputs.version }}.zip"
+          test -f "dist/PixelCrusher-${{ steps.version.outputs.version }}.dmg"
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
           name: pixelcrusher-macos-native
           path: |
-            dist/PixelCrusher.dmg
-            dist/PixelCrusher.zip
+            dist/PixelCrusher-${{ steps.version.outputs.version }}.dmg
+            dist/PixelCrusher-${{ steps.version.outputs.version }}.zip
 
   linux-tauri:
     name: Linux Tauri bundles (AppImage/deb)
@@ -54,6 +67,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Version consistency check
+        run: npm run version:check
 
       - name: Install Linux system dependencies
         run: |
@@ -65,17 +87,16 @@ jobs:
             librsvg2-dev \
             patchelf
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install npm dependencies
         run: npm ci
+
+      - name: Frontend + queue smoke tests
+        run: |
+          npm test
+          cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Prepare bundled optimizer toolchain (Linux)
         run: npm run bundled-tools:prepare
@@ -115,11 +136,19 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Version consistency check
+        run: npm run version:check
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install npm dependencies
         run: npm ci
+
+      - name: Frontend + queue smoke tests
+        run: |
+          npm test
+          cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Prepare bundled optimizer toolchain (Windows)
         run: npm run bundled-tools:prepare

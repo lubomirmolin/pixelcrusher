@@ -2,11 +2,23 @@ import { describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn(() => Promise.resolve([])),
+  invoke: vi.fn((command: string) => {
+    if (command === 'app_version') {
+      return Promise.resolve('1.2.3');
+    }
+
+    return Promise.resolve([]);
+  }),
 }));
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(() => Promise.resolve(() => undefined)),
+}));
+
+vi.mock('@tauri-apps/api/webview', () => ({
+  getCurrentWebview: vi.fn(() => ({
+    onDragDropEvent: vi.fn(() => Promise.resolve(() => undefined)),
+  })),
 }));
 
 import App from './App';
@@ -21,10 +33,11 @@ function expectOrdered(text: string, sequence: string[]) {
 }
 
 describe('App layout', () => {
-  it('renders split rail sections in expected order', () => {
+  it('renders split rail sections in expected order with update controls', () => {
     const html = renderToStaticMarkup(<App />);
 
-    expectOrdered(html, ['General', 'Dimensions', 'Optimizers', 'JPEG quality']);
+    expectOrdered(html, ['Updates', 'General', 'Dimensions', 'Optimizers', 'JPEG quality']);
+    expect(html).toContain('Check for Updates');
   });
 
   it('renders drop zone, queue controls, and bottom status pills', () => {

@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use pixelcrusher_core::queue::{JobEvent, JobState, QueueMachine};
 use pixelcrusher_core::types::{ProcessOptions, ToolStatus};
+use rfd::FileDialog;
 use serde::Serialize;
 use tauri::{Emitter, Manager};
 use uuid::Uuid;
@@ -61,6 +62,23 @@ fn recent_results(state: tauri::State<'_, AppState>) -> Vec<JobResultEntry> {
 }
 
 #[tauri::command]
+fn app_version(app: tauri::AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
+#[tauri::command]
+fn select_input_files() -> Vec<String> {
+    FileDialog::new()
+        .set_title("Select images to optimize")
+        .add_filter("Images", &["png", "jpg", "jpeg", "svg", "gif"])
+        .pick_files()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| path.display().to_string())
+        .collect()
+}
+
+#[tauri::command]
 fn enqueue_paths(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -68,9 +86,16 @@ fn enqueue_paths(
     options: ProcessOptions,
 ) -> Result<Vec<JobSnapshot>, String> {
     let state = state.runtime.clone();
+    let enqueue_candidates = normalize_input_paths(paths)?;
+
+    log::info!(
+        "enqueue_paths received request with {} files",
+        enqueue_candidates.len()
+    );
+
     let mut created = vec![];
 
-    for input_path in paths.into_iter().filter(|p| !p.trim().is_empty()) {
+    for input_path in enqueue_candidates {
         let id = Uuid::new_v4().to_string();
 
         let snapshot = JobSnapshot {
@@ -88,6 +113,8 @@ fn enqueue_paths(
             .lock()
             .unwrap()
             .insert(id.clone(), snapshot.clone());
+
+        log::info!("Queued job {} for {}", id, snapshot.input_path);
 
         let _ = app.emit(
             "queue://event",
@@ -147,6 +174,39 @@ fn reveal_in_finder(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("Only http(s) URLs are allowed".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&url)
+            .status()
+            .map_err(|e| format!("failed to open URL: {e}"))?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&url)
+            .status()
+            .map_err(|e| format!("failed to open URL: {e}"))?;
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .status()
+            .map_err(|e| format!("failed to open URL: {e}"))?;
+    }
+
+    Ok(())
+}
+
 fn process_job(
     app: tauri::AppHandle,
     state: Arc<RuntimeState>,
@@ -156,7 +216,13 @@ fn process_job(
 ) {
     let output_dir = state.output_dir.clone();
 
-    if transition_and_emit(
+    log::info!(
+        "Starting processing pipeline for job {} ({})",
+        id,
+        input_path
+    );
+
+    if let Err(err) = transition_and_emit(
         &app,
         &state,
         &id,
@@ -164,13 +230,12 @@ fn process_job(
         10,
         "Running diagnostics",
         None,
-    )
-    .is_err()
-    {
+    ) {
+        log::error!("job {} failed to enter diagnostics state: {}", id, err);
         return;
     }
 
-    if transition_and_emit(
+    if let Err(err) = transition_and_emit(
         &app,
         &state,
         &id,
@@ -178,13 +243,12 @@ fn process_job(
         40,
         "Processing image",
         None,
-    )
-    .is_err()
-    {
+    ) {
+        log::error!("job {} failed to enter processing state: {}", id, err);
         return;
     }
 
-    if transition_and_emit(
+    if let Err(err) = transition_and_emit(
         &app,
         &state,
         &id,
@@ -192,9 +256,8 @@ fn process_job(
         70,
         "Optimizing output",
         None,
-    )
-    .is_err()
-    {
+    ) {
+        log::error!("job {} failed to enter optimizing state: {}", id, err);
         return;
     }
 
@@ -236,6 +299,7 @@ fn process_job(
             trim_recent(&state);
         }
         Err(err) => {
+            log::error!("job {} failed while processing {}: {}", id, input_path, err);
             let _ = transition_and_emit(
                 &app,
                 &state,
@@ -257,13 +321,12 @@ fn transition_and_emit(
     progress: u8,
     message: &str,
     result: Option<JobResultEntry>,
-) -> Result<(), ()> {
+) -> Result<(), String> {
     let status = {
         let mut machine = state.queue_machine.lock().unwrap();
-        match machine.transition(id, event) {
-            Ok(next) => next,
-            Err(_) => return Err(()),
-        }
+        machine
+            .transition(id, event)
+            .map_err(|err| format!("queue transition error for {id}: {err}"))?
     };
 
     let snapshot = JobSnapshot {
@@ -280,6 +343,14 @@ fn transition_and_emit(
         message: message.to_string(),
     };
 
+    log::info!(
+        "job {} transition {:?} -> {} ({}%)",
+        id,
+        event,
+        snapshot.status,
+        progress
+    );
+
     state
         .jobs
         .lock()
@@ -295,6 +366,45 @@ fn transition_and_emit(
     );
 
     Ok(())
+}
+
+fn normalize_input_paths(paths: Vec<String>) -> Result<Vec<String>, String> {
+    let mut accepted = vec![];
+    let mut seen = HashSet::new();
+
+    for raw in paths {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let original = PathBuf::from(trimmed);
+        if !original.exists() {
+            log::warn!("Rejected enqueue path (missing): {}", trimmed);
+            continue;
+        }
+
+        if !original.is_file() {
+            log::warn!("Rejected enqueue path (not a file): {}", trimmed);
+            continue;
+        }
+
+        let normalized = std::fs::canonicalize(&original).unwrap_or(original);
+        let key = normalized.to_string_lossy().to_string();
+
+        if seen.insert(key.clone()) {
+            accepted.push(key);
+        }
+    }
+
+    if accepted.is_empty() {
+        return Err(
+            "No valid file paths were provided. Drag files into the app window or use the system file picker."
+                .to_string(),
+        );
+    }
+
+    Ok(accepted)
 }
 
 fn trim_recent(state: &Arc<RuntimeState>) {
@@ -362,8 +472,41 @@ pub fn run() {
             startup_diagnostics,
             enqueue_paths,
             recent_results,
-            reveal_in_finder
+            reveal_in_finder,
+            select_input_files,
+            app_version,
+            open_external_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn normalize_input_paths_accepts_existing_files_and_deduplicates() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("input.png");
+        fs::write(&file, b"not-a-real-png").unwrap();
+
+        let paths = vec![
+            file.display().to_string(),
+            file.display().to_string(),
+            "   ".to_string(),
+        ];
+
+        let normalized = normalize_input_paths(paths).unwrap();
+        assert_eq!(normalized.len(), 1);
+        assert!(normalized[0].contains("input.png"));
+    }
+
+    #[test]
+    fn normalize_input_paths_rejects_missing_payload() {
+        let err = normalize_input_paths(vec![" ".to_string(), "/does/not/exist.png".to_string()])
+            .unwrap_err();
+        assert!(err.contains("No valid file paths"));
+    }
 }

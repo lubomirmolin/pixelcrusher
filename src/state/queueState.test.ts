@@ -45,4 +45,33 @@ describe('queueReducer', () => {
     expect(withJob.recent).toHaveLength(1);
     expect(withJob.recent[0].id).toBe('2');
   });
+
+  it('stores queue errors from failed jobs for explicit UI reporting', () => {
+    const failed = queueReducer(initialQueueState, {
+      type: 'INGEST_EVENT',
+      payload: {
+        job: {
+          id: '3',
+          input_path: 'C:\\images\\broken.png',
+          status: 'failed',
+          progress: 100,
+          message: 'Failed: missing optimizer binary',
+        },
+      },
+    });
+
+    expect(failed.lastError).toBe('Failed: missing optimizer binary');
+  });
+
+  it('allows setting and clearing enqueue/invoke errors', () => {
+    const withError = queueReducer(initialQueueState, {
+      type: 'QUEUE_ERROR',
+      payload: 'No valid file paths were provided by the UI.',
+    });
+
+    expect(withError.lastError).toContain('No valid file paths');
+
+    const cleared = queueReducer(withError, { type: 'CLEAR_QUEUE_ERROR' });
+    expect(cleared.lastError).toBeNull();
+  });
 });

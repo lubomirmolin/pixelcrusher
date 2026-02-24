@@ -47,8 +47,9 @@ bash scripts/build-macos.sh
 Artifacts are written to:
 
 - `dist/PixelCrusher.app`
-- `dist/PixelCrusher.dmg`
-- `dist/PixelCrusher.zip`
+- `dist/PixelCrusher-<version>.dmg`
+- `dist/PixelCrusher-<version>.zip`
+- compatibility aliases: `dist/PixelCrusher.dmg`, `dist/PixelCrusher.zip`
 
 The DMG includes:
 
@@ -154,6 +155,14 @@ Workflows:
   - Builds all platform artifacts and publishes them to GitHub Releases
 
 ### Release flow
+
+Version source of truth is synchronized across:
+
+- `package.json`
+- `src-tauri/tauri.conf.json`
+- `src-tauri/Cargo.toml`
+
+Run `npm run version:check` locally (CI also enforces this).
 
 1. Ensure version/tag is ready.
 2. Push a semver tag:

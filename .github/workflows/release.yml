@@ -24,22 +24,40 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(node -e 'const fs=require("node:fs");const pkg=JSON.parse(fs.readFileSync("package.json","utf8"));process.stdout.write(pkg.version);')"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Sync app version from tag/config
+        run: node scripts/version_sync.cjs --set "${{ steps.version.outputs.version }}" --check
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build native macOS artifacts
+        env:
+          PIXELCRUSHER_VERSION: ${{ steps.version.outputs.version }}
         run: bash scripts/build-macos.sh
 
-      - name: Verify updater asset (macOS ZIP)
-        run: test -f dist/PixelCrusher.zip
+      - name: Verify updater + versioned macOS assets
+        run: |
+          test -f "dist/PixelCrusher-${{ steps.version.outputs.version }}.zip"
+          test -f "dist/PixelCrusher-${{ steps.version.outputs.version }}.dmg"
 
       - name: Upload macOS release artifacts
         uses: actions/upload-artifact@v4
         with:
           name: release-macos
           path: |
-            dist/PixelCrusher.dmg
-            dist/PixelCrusher.zip
+            dist/PixelCrusher-${{ steps.version.outputs.version }}.dmg
+            dist/PixelCrusher-${{ steps.version.outputs.version }}.zip
 
   build-linux:
     name: Build Linux artifacts
@@ -48,6 +66,26 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(node -e 'const fs=require("node:fs");const pkg=JSON.parse(fs.readFileSync("package.json","utf8"));process.stdout.write(pkg.version);')"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Sync app version from tag/config
+        run: node scripts/version_sync.cjs --set "${{ steps.version.outputs.version }}" --check
 
       - name: Install Linux system dependencies
         run: |
@@ -59,17 +97,16 @@ jobs:
             librsvg2-dev \
             patchelf
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install npm dependencies
         run: npm ci
+
+      - name: Frontend + queue smoke tests
+        run: |
+          npm test
+          cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Prepare bundled optimizer toolchain (Linux)
         run: npm run bundled-tools:prepare
@@ -79,6 +116,18 @@ jobs:
 
       - name: Verify bundled tools in Linux bundle output
         run: npm run bundled-tools:check:linux
+
+      - name: Verify Linux artifact filenames include synced version
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          find src-tauri/target/x86_64-unknown-linux-gnu/release/bundle -type f \( -name '*.AppImage' -o -name '*.deb' \) | while read -r file; do
+            base="$(basename "$file")"
+            if [[ "$base" != *"$VERSION"* ]]; then
+              echo "Artifact filename missing synced version: $base"
+              exit 1
+            fi
+          done
 
       - name: Print Linux artifact sizes
         run: |
@@ -108,11 +157,30 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(node -e 'const fs=require("node:fs");const pkg=JSON.parse(fs.readFileSync("package.json","utf8"));process.stdout.write(pkg.version);')"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Sync app version from tag/config
+        run: node scripts/version_sync.cjs --set "${{ steps.version.outputs.version }}" --check
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install npm dependencies
         run: npm ci
+
+      - name: Frontend + queue smoke tests
+        run: |
+          npm test
+          cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Prepare bundled optimizer toolchain (Windows)
         run: npm run bundled-tools:prepare
@@ -122,6 +190,17 @@ jobs:
 
       - name: Verify bundled tools in Windows bundle output
         run: npm run bundled-tools:check:windows
+
+      - name: Verify Windows artifact filenames include synced version
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $artifacts = Get-ChildItem -Path src-tauri/target/x86_64-pc-windows-msvc/release/bundle -Recurse -Include *.msi,*.exe
+          foreach ($artifact in $artifacts) {
+            if (-not $artifact.Name.Contains($version)) {
+              throw "Artifact filename missing synced version: $($artifact.Name)"
+            }
+          }
 
       - name: Print Windows artifact sizes
         shell: pwsh

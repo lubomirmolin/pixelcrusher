@@ -10,8 +10,6 @@ SWIFT_PRODUCT="PixelCrusherMac"
 BUNDLE_NAME="${APP_NAME}.app"
 DIST_DIR="$ROOT_DIR/dist"
 APP_DIR="$DIST_DIR/$BUNDLE_NAME"
-ZIP_PATH="$DIST_DIR/${APP_NAME}.zip"
-DMG_PATH="$DIST_DIR/${APP_NAME}.dmg"
 DMG_STAGING_DIR="$DIST_DIR/dmg-staging"
 ICON_SOURCE_PNG="$ROOT_DIR/src-tauri/icons/icon.png"
 ICON_SOURCE_ICNS="$ROOT_DIR/resources/PixelCrusher-macOS.icns"
@@ -20,8 +18,12 @@ ICNS_PATH="$APP_DIR/Contents/Resources/AppIcon.icns"
 BUNDLED_TOOLS_DIR="$APP_DIR/Contents/Resources/BundledTools"
 SWIFT_BINARY="$ROOT_DIR/.build/release/$SWIFT_PRODUCT"
 RUST_CLI_BINARY="$ROOT_DIR/crates/pixelcrusher-core/target/release/pixelcrusher-cli"
-APP_VERSION="${PIXELCRUSHER_VERSION:-0.1.0}"
+APP_VERSION="${PIXELCRUSHER_VERSION:-$(node -e 'const fs=require("node:fs");const pkg=JSON.parse(fs.readFileSync("package.json","utf8"));process.stdout.write(pkg.version);')}"
 APP_BUILD_NUMBER="${PIXELCRUSHER_BUILD_NUMBER:-1}"
+ZIP_PATH="$DIST_DIR/${APP_NAME}-${APP_VERSION}.zip"
+DMG_PATH="$DIST_DIR/${APP_NAME}-${APP_VERSION}.dmg"
+LATEST_ZIP_PATH="$DIST_DIR/${APP_NAME}.zip"
+LATEST_DMG_PATH="$DIST_DIR/${APP_NAME}.dmg"
 
 cargo test --manifest-path crates/pixelcrusher-core/Cargo.toml
 swift test
@@ -139,17 +141,21 @@ PIXELCRUSHER_APP_BUNDLE_UNDER_TEST="$APP_DIR" swift test --filter PackagingBundl
 
 codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || true
 
-rm -f "$ZIP_PATH"
+rm -f "$ZIP_PATH" "$LATEST_ZIP_PATH"
 ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$ZIP_PATH"
+cp "$ZIP_PATH" "$LATEST_ZIP_PATH"
 
-rm -f "$DMG_PATH"
+rm -f "$DMG_PATH" "$LATEST_DMG_PATH"
 rm -rf "$DMG_STAGING_DIR"
 mkdir -p "$DMG_STAGING_DIR"
 cp -R "$APP_DIR" "$DMG_STAGING_DIR/$BUNDLE_NAME"
 ln -s /Applications "$DMG_STAGING_DIR/Applications"
 hdiutil create -volname "$APP_NAME" -srcfolder "$DMG_STAGING_DIR" -ov -format UDZO "$DMG_PATH" >/dev/null
+cp "$DMG_PATH" "$LATEST_DMG_PATH"
 
 echo "Built artifacts:"
 echo "  App: $APP_DIR"
 echo "  Zip: $ZIP_PATH"
 echo "  Dmg: $DMG_PATH"
+echo "  Latest Zip alias: $LATEST_ZIP_PATH"
+echo "  Latest Dmg alias: $LATEST_DMG_PATH"
