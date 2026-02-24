@@ -22,6 +22,7 @@ vi.mock('@tauri-apps/api/webview', () => ({
 }));
 
 import App from './App';
+import { UpdateRail } from './components/UpdateRail';
 
 function expectOrdered(text: string, sequence: string[]) {
   let index = -1;
@@ -38,6 +39,33 @@ describe('App layout', () => {
 
     expectOrdered(html, ['Updates', 'General', 'Dimensions', 'Optimizers', 'JPEG quality']);
     expect(html).toContain('Check for Updates');
+  });
+
+  it('renders actionable Windows install controls (not release-page-only fallback)', () => {
+    const html = renderToStaticMarkup(
+      <UpdateRail
+        appVersion="1.1.0"
+        updateState={{
+          status: 'ready-to-install',
+          latestVersion: '1.2.0',
+          releaseUrl: 'https://github.com/lubomirmolin/pixelcrusher/releases/tag/v1.2.0',
+          asset: {
+            kind: 'windows-exe',
+            name: 'PixelCrusher_1.2.0_x64-setup.exe',
+            url: 'https://github.com/lubomirmolin/pixelcrusher/releases/download/v1.2.0/PixelCrusher_1.2.0_x64-setup.exe',
+          },
+          downloadPath: 'C:/Temp/PixelCrusher_1.2.0_x64-setup.exe',
+          downloadedSha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        }}
+        onCheckForUpdates={() => undefined}
+        onDownloadUpdate={() => undefined}
+        onInstallUpdate={() => undefined}
+        onOpenReleasePage={() => undefined}
+      />,
+    );
+
+    expect(html).toContain('Install Update');
+    expect(html).not.toContain('Download Update');
   });
 
   it('renders drop zone, queue controls, and bottom status pills', () => {

@@ -139,6 +139,40 @@ The updater installs to `/Applications/PixelCrusher.app`.
 - If `/Applications` is writable for current user: update proceeds in-app.
 - If not writable: updater fails gracefully with guidance to move app to `~/Applications` or update manually via release download.
 
+## In-app updater (Tauri Windows/Linux)
+
+The Tauri app now includes a full manual updater flow in the **Updates** card:
+
+1. **Check for Updates**
+2. If newer release exists, app selects a trusted platform asset:
+   - Windows: prefers **NSIS `.exe`** installer, fallback `.msi`
+   - Linux: prefers **`.AppImage`**, fallback `.deb`
+3. App resolves SHA-256 digest (metadata digest first, then companion checksum files)
+4. App downloads installer, verifies SHA-256, and only then allows install action
+5. Install is initiated from inside app (no release-page-only flow)
+
+Security rules:
+
+- Strict semantic version gating (`latest > current` only)
+- Trusted release URL allow-list only:
+  - `github.com/<owner>/<repo>/releases/download/...`
+  - `objects.githubusercontent.com`
+  - `github-releases.githubusercontent.com`
+  - `release-assets.githubusercontent.com`
+- Hash mismatch aborts install
+
+Windows installer launch behavior:
+
+- NSIS `.exe`: launched with silent switch `/S`
+- MSI `.msi`: launched via `msiexec /i <installer> /passive /norestart`
+- App exits cleanly after launch to allow replacement/update
+
+Linux installer launch behavior:
+
+- `.AppImage`: executable bit is set, AppImage is launched, app exits for relaunch path
+- `.deb`: app opens package file with `xdg-open` and shows explicit privileged command guidance:
+  - `sudo apt install '<downloaded-file>.deb'`
+
 ## GitHub Actions CI + Releases
 
 Workflows:

@@ -18,14 +18,37 @@ import {
 } from './state/toolDiagnostics';
 import {
   compareSemver,
-  describeUpdateState,
   normalizeReleaseVersion,
-  type UpdateCheckState,
+  pickPreferredAsset,
+  resolveExpectedSha256,
+  updateReducer,
+  type GitHubReleaseAsset,
+  type RuntimePlatform,
+  type UpdateFlowState,
 } from './state/updateState';
+import { UpdateRail } from './components/UpdateRail';
 
 const TERMINAL_JOB_STATUSES = new Set(['completed', 'failed']);
 const RELEASES_LATEST_URL = 'https://api.github.com/repos/lubomirmolin/pixelcrusher/releases/latest';
 const RELEASES_PAGE_URL = 'https://github.com/lubomirmolin/pixelcrusher/releases';
+
+type ReleasePayload = {
+  tag_name?: string;
+  html_url?: string;
+  assets?: GitHubReleaseAsset[];
+};
+
+type DownloadedUpdatePayload = {
+  path: string;
+  size: number;
+  sha256: string;
+};
+
+type InstallUpdateResult = {
+  mode: 'launched-and-exit' | 'launched' | 'guidance';
+  message: string;
+  command?: string;
+};
 
 function basename(filePath: string): string {
   const parts = filePath.split(/[\\/]/).filter(Boolean);
@@ -62,12 +85,34 @@ function isTauriRuntime(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
+function normalizeReleasePageURL(candidate?: string): string {
+  if (!candidate) {
+    return RELEASES_PAGE_URL;
+  }
+
+  try {
+    const parsed = new URL(candidate);
+    if (
+      parsed.protocol === 'https:' &&
+      parsed.hostname.toLowerCase() === 'github.com' &&
+      parsed.pathname.startsWith('/lubomirmolin/pixelcrusher/releases')
+    ) {
+      return parsed.toString();
+    }
+  } catch {
+    // fall through to default
+  }
+
+  return RELEASES_PAGE_URL;
+}
+
 function App() {
   const [queueState, dispatch] = useReducer(queueReducer, initialQueueState);
   const [diagnostics, setDiagnostics] = useState<ToolStatus[]>([]);
   const [dragActive, setDragActive] = useState(false);
   const [appVersion, setAppVersion] = useState('0.0.0');
-  const [updateState, setUpdateState] = useState<UpdateCheckState>({ status: 'idle' });
+  const [runtimePlatform, setRuntimePlatform] = useState<RuntimePlatform>('unknown');
+  const [updateState, updateDispatch] = useReducer(updateReducer, { status: 'idle' } as UpdateFlowState);
 
   const [trimTransparent, setTrimTransparent] = useState(true);
   const [cropWidth, setCropWidth] = useState('');
@@ -98,6 +143,14 @@ function App() {
         const normalized = normalizeReleaseVersion(version);
         if (normalized) {
           setAppVersion(normalized);
+        }
+      })
+      .catch(() => undefined);
+
+    invoke<string>('runtime_platform')
+      .then((platform) => {
+        if (platform === 'windows' || platform === 'linux' || platform === 'macos') {
+          setRuntimePlatform(platform);
         }
       })
       .catch(() => undefined);
@@ -274,7 +327,7 @@ function App() {
   };
 
   const onCheckForUpdates = async () => {
-    setUpdateState({ status: 'checking' });
+    updateDispatch({ type: 'START_CHECK' });
 
     try {
       const response = await fetch(RELEASES_LATEST_URL, {
@@ -287,28 +340,105 @@ function App() {
         throw new Error(`GitHub release check failed with HTTP ${response.status}`);
       }
 
-      const payload = (await response.json()) as {
-        tag_name?: string;
-        html_url?: string;
-      };
+      const payload = (await response.json()) as ReleasePayload;
+      const releaseUrl = normalizeReleasePageURL(payload.html_url);
 
       const latestVersion = normalizeReleaseVersion(payload.tag_name ?? '');
       if (!latestVersion) {
         throw new Error('Latest release tag is not a semantic version (expected vX.Y.Z).');
       }
 
-      if (compareSemver(latestVersion, appVersion) > 0) {
-        setUpdateState({
-          status: 'available',
-          latestVersion,
-          releaseUrl: payload.html_url || RELEASES_PAGE_URL,
-        });
-      } else {
-        setUpdateState({ status: 'up-to-date', latestVersion });
+      if (compareSemver(latestVersion, appVersion) <= 0) {
+        updateDispatch({ type: 'SET_UP_TO_DATE', latestVersion });
+        return;
       }
+
+      const preferredAsset = pickPreferredAsset(payload.assets ?? [], runtimePlatform);
+      if (!preferredAsset) {
+        throw new Error(
+          runtimePlatform === 'windows'
+            ? 'Latest release has no trusted Windows installer asset (.exe preferred, .msi fallback).'
+            : runtimePlatform === 'linux'
+              ? 'Latest release has no trusted Linux update asset (.AppImage preferred, .deb fallback).'
+              : 'Latest release has no trusted installable update asset for this platform.',
+        );
+      }
+
+      updateDispatch({
+        type: 'SET_AVAILABLE',
+        latestVersion,
+        releaseUrl,
+        asset: preferredAsset,
+      });
     } catch (error) {
-      setUpdateState({
-        status: 'error',
+      updateDispatch({
+        type: 'FAIL',
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  const onDownloadUpdate = async () => {
+    if (updateState.status !== 'available') {
+      return;
+    }
+
+    const candidate = updateState;
+    updateDispatch({ type: 'START_DOWNLOAD' });
+
+    try {
+      const expectedSha256 = await resolveExpectedSha256(candidate.asset, fetch);
+      updateDispatch({ type: 'SET_DOWNLOAD_PROGRESS', progress: null });
+
+      const downloaded = await invoke<DownloadedUpdatePayload>('download_verified_update', {
+        url: candidate.asset.url,
+        fileName: candidate.asset.name,
+        expectedSha256,
+      });
+
+      updateDispatch({
+        type: 'SET_READY_TO_INSTALL',
+        downloadPath: downloaded.path,
+        downloadedSha256: downloaded.sha256,
+      });
+    } catch (error) {
+      updateDispatch({
+        type: 'FAIL',
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  const onInstallUpdate = async () => {
+    if (updateState.status !== 'ready-to-install') {
+      return;
+    }
+
+    const candidate = updateState;
+    updateDispatch({ type: 'START_INSTALL' });
+
+    try {
+      const result = await invoke<InstallUpdateResult>('install_downloaded_update', {
+        path: candidate.downloadPath,
+        assetKind: candidate.asset.kind,
+      });
+
+      if (result.mode === 'guidance') {
+        updateDispatch({
+          type: 'SET_ACTION_REQUIRED',
+          reason: result.message,
+          command: result.command,
+        });
+        return;
+      }
+
+      updateDispatch({
+        type: 'SET_RELAUNCHING',
+        latestVersion: candidate.latestVersion,
+      });
+    } catch (error) {
+      updateDispatch({
+        type: 'FAIL',
         reason: error instanceof Error ? error.message : String(error),
       });
     }
@@ -318,8 +448,8 @@ function App() {
     try {
       await invoke('open_external_url', { url });
     } catch {
-      setUpdateState({
-        status: 'error',
+      updateDispatch({
+        type: 'FAIL',
         reason: 'Unable to open the release page from this environment.',
       });
     }
@@ -445,24 +575,14 @@ function App() {
         </section>
 
         <aside className="right-pane">
-          <section className="rail-section">
-            <div className="card-header compact-header">
-              <h3>Updates</h3>
-              <button
-                className="ghost-btn"
-                disabled={updateState.status === 'checking'}
-                onClick={() => void onCheckForUpdates()}
-              >
-                {updateState.status === 'checking' ? 'Checking…' : 'Check for Updates'}
-              </button>
-            </div>
-            <p className="update-status-text">{describeUpdateState(updateState, appVersion)}</p>
-            {updateState.status === 'available' ? (
-              <button className="ghost-btn" onClick={() => void openReleasePage(updateState.releaseUrl)}>
-                Open Release Page
-              </button>
-            ) : null}
-          </section>
+          <UpdateRail
+            appVersion={appVersion}
+            updateState={updateState}
+            onCheckForUpdates={() => void onCheckForUpdates()}
+            onDownloadUpdate={() => void onDownloadUpdate()}
+            onInstallUpdate={() => void onInstallUpdate()}
+            onOpenReleasePage={(url) => void openReleasePage(url)}
+          />
 
           <section className="rail-section">
             <h3>General</h3>

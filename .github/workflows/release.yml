@@ -202,12 +202,34 @@ jobs:
             }
           }
 
+      - name: Create deterministic Windows updater alias asset
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          New-Item -ItemType Directory -Force -Path dist/release-alias | Out-Null
+
+          $allExe = @(Get-ChildItem -Path src-tauri/target/x86_64-pc-windows-msvc/release/bundle -Recurse -Include *.exe)
+          if ($allExe.Count -eq 0) {
+            throw "No Windows .exe release artifacts found"
+          }
+
+          $preferredExe = $allExe |
+            Where-Object { $_.Name -match 'setup' } |
+            Sort-Object Name |
+            Select-Object -First 1
+          if (-not $preferredExe) {
+            $preferredExe = $allExe | Sort-Object Name | Select-Object -First 1
+          }
+
+          Copy-Item $preferredExe.FullName "dist/release-alias/PixelCrusher-$version-windows-installer.exe" -Force
+
       - name: Print Windows artifact sizes
         shell: pwsh
         run: |
           Get-ChildItem -Path src-tauri/target/x86_64-pc-windows-msvc/release/bundle -Recurse -Include *.msi,*.exe |
             Select-Object FullName, Length |
             Format-Table -AutoSize
+          Get-ChildItem -Path dist/release-alias -File | Select-Object FullName, Length | Format-Table -AutoSize
           Get-Content dist/bundle-evidence/bundled-tools-windows.txt
 
       - name: Upload Windows release artifacts
@@ -217,6 +239,7 @@ jobs:
           path: |
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.msi
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.exe
+            dist/release-alias/PixelCrusher-*-windows-installer.exe
             dist/bundle-evidence/bundled-tools-windows.txt
 
   publish:
