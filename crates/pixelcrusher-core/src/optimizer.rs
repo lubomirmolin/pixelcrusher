@@ -4,6 +4,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::sync::{OnceLock, RwLock};
 
 use anyhow::{Context, Result};
@@ -350,8 +352,16 @@ fn pngcrush_args(input_path: &Path, output_path: &Path) -> Vec<String> {
 }
 
 fn run_command(binary: &Path, args: &[&str]) -> Result<()> {
-    let output = Command::new(binary)
-        .args(args)
+    let mut command = Command::new(binary);
+    command.args(args);
+
+    #[cfg(windows)]
+    {
+        // CREATE_NO_WINDOW to avoid flashing a terminal window for each CLI tool invocation.
+        command.creation_flags(0x08000000);
+    }
+
+    let output = command
         .output()
         .with_context(|| format!("failed to run {}", binary.display()))?;
 
