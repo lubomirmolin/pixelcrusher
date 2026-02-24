@@ -13,8 +13,10 @@ APP_DIR="$DIST_DIR/$BUNDLE_NAME"
 DMG_STAGING_DIR="$DIST_DIR/dmg-staging"
 ICON_SOURCE_PNG="$ROOT_DIR/src-tauri/icons/icon.png"
 ICON_SOURCE_ICNS="$ROOT_DIR/resources/PixelCrusher-macOS.icns"
+FIST_SOURCE_PNG="$ROOT_DIR/fist.png"
 ICONSET_DIR="$DIST_DIR/AppIcon.iconset"
 ICNS_PATH="$APP_DIR/Contents/Resources/AppIcon.icns"
+FIST_PATH="$APP_DIR/Contents/Resources/fist.png"
 BUNDLED_TOOLS_DIR="$APP_DIR/Contents/Resources/BundledTools"
 SWIFT_BINARY="$ROOT_DIR/.build/release/$SWIFT_PRODUCT"
 RUST_CLI_BINARY="$ROOT_DIR/crates/pixelcrusher-core/target/release/pixelcrusher-cli"
@@ -58,6 +60,10 @@ elif [[ -f "$ICON_SOURCE_PNG" ]]; then
   sips -z 512 512 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_512x512.png" >/dev/null
 
   iconutil -c icns "$ICONSET_DIR" -o "$ICNS_PATH"
+fi
+
+if [[ -f "$FIST_SOURCE_PNG" ]]; then
+  cp "$FIST_SOURCE_PNG" "$FIST_PATH"
 fi
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST

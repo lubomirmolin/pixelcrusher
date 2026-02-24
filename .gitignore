@@ -26,3 +26,4 @@ src-tauri/resources/BundledTools/*
 *.njsproj
 *.sln
 *.sw?
+AGENTS.md

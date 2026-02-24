@@ -9,6 +9,8 @@ struct ProcessingResult: Identifiable {
     let inputURL: URL
     let enqueuedOrder: Int
     var outputURL: URL?
+    var inputBytes: Int64?
+    var outputBytes: Int64?
     var success: Bool
     var state: ProcessingItemState
     var statusText: String
@@ -186,6 +188,7 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var pendingCount = 0
     @Published private(set) var completedCount = 0
     @Published private(set) var totalCount = 0
+    @Published private(set) var activeItemID: UUID?
     @Published private(set) var activeItemName: String?
     @Published private(set) var isQueueRunning = false
     @Published private(set) var toolStatuses: [OptimizerToolStatus] = []
@@ -411,6 +414,8 @@ final class AppViewModel: ObservableObject {
             inputURL: fileURL,
             enqueuedOrder: queuedItem.enqueuedOrder,
             outputURL: nil,
+            inputBytes: fileSize(at: fileURL),
+            outputBytes: nil,
             success: false,
             state: .queued,
             statusText: ProcessingStatusTextFormatter.text(for: .queued),
@@ -431,6 +436,8 @@ final class AppViewModel: ObservableObject {
             inputURL: inputURL,
             enqueuedOrder: 0,
             outputURL: nil,
+            inputBytes: fileSize(at: inputURL),
+            outputBytes: nil,
             success: false,
             state: .failed,
             statusText: message,
@@ -515,6 +522,8 @@ final class AppViewModel: ObservableObject {
 
         guard let index = resultIndexByID[id] else { return }
         results[index].outputURL = report.outputURL
+        results[index].inputBytes = report.inputBytes
+        results[index].outputBytes = report.outputBytes
         results[index].success = true
         results[index].state = .done
         results[index].statusText = "Done"
@@ -554,6 +563,7 @@ final class AppViewModel: ObservableObject {
         completedCount = progress.completedCount
         totalCount = progress.totalCount
         isQueueRunning = progress.isRunning
+        activeItemID = progress.activeItemID
 
         if let activeID = progress.activeItemID,
            let index = resultIndexByID[activeID] {
@@ -561,6 +571,19 @@ final class AppViewModel: ObservableObject {
         } else {
             activeItemName = nil
         }
+    }
+
+    private func fileSize(at url: URL) -> Int64? {
+        guard url.isFileURL else {
+            return nil
+        }
+
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? NSNumber else {
+            return nil
+        }
+
+        return size.int64Value
     }
 
     private func currentOptions() -> ImageProcessingOptions {
@@ -647,15 +670,15 @@ final class AppViewModel: ObservableObject {
 }
 
 struct ContentView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @StateObject private var model = AppViewModel()
+    private let windowOpacity: CGFloat = 1.0
 
     @State private var profile: CompressionProfile = .balanced
     @State private var showUpdateSheet = false
 
     @State private var cropTarget: ProcessingResult?
     @State private var resizeTarget: ProcessingResult?
-    @State private var folderCropTarget: URL?
-    @State private var folderResizeTarget: URL?
 
     @State private var cropDraftWidth = ""
     @State private var cropDraftHeight = ""
@@ -665,46 +688,74 @@ struct ContentView: View {
     @State private var resizeDraftHeight = ""
     @State private var resizeDraftLock = true
 
-    @State private var folderCropPreset = "1024"
-    @State private var folderCropAnchor: CropAnchor = .center
-    @State private var folderResizePreset = "1024"
-    @State private var folderResizeLock = true
-
-    @State private var folderBatchSummary: [String: String] = [:]
     @State private var itemSummary: [UUID: String] = [:]
-
-    private let sizePresets: [(id: String, label: String, width: String, height: String)] = [
-        ("original", "Original size", "", ""),
-        ("512", "512 × 512", "512", "512"),
-        ("1024", "1024 × 1024", "1024", "1024"),
-        ("2048", "2048 × 2048", "2048", "2048")
-    ]
-
-    private var queuePercentText: String {
-        guard model.totalCount > 0 else { return "0%" }
-        return "\(Int((model.overallProgress * 100).rounded()))%"
-    }
+    @State private var punchSession: PunchSession?
+    @State private var playedPunchIDs: Set<UUID> = []
 
     private var isEmptyState: Bool {
-        model.results.isEmpty
+        model.results.isEmpty && punchSession == nil && !model.isQueueRunning
+    }
+
+    private var showBottomHint: Bool {
+        !model.results.isEmpty || punchSession != nil || model.isQueueRunning
+    }
+
+    private var processedItems: [ProcessingResult] {
+        model.results
+            .filter { $0.state == .done || $0.state == .failed }
+            .sorted { lhs, rhs in
+                lhs.enqueuedOrder > rhs.enqueuedOrder
+            }
     }
 
     var body: some View {
         ZStack {
-            VStack(spacing: 0) {
-                topBar
-                Divider()
-                mainPane
-            }
+            WindowBlurBackdrop(material: colorScheme == .dark ? .hudWindow : .underWindowBackground)
+                .ignoresSafeArea()
+
+            Color(nsColor: colorScheme == .dark
+                ? NSColor(calibratedWhite: 0.0, alpha: 0.24)
+                : NSColor(calibratedWhite: 1.0, alpha: 0.08)
+            )
+            .ignoresSafeArea()
+
+            appSurface
 
             if model.isDropTargeted {
                 dragOverlay
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
-        .frame(minWidth: 980, minHeight: 680)
+        .frame(minWidth: 980, minHeight: 700)
+        .background(WindowAppearanceConfigurator(opacity: windowOpacity))
+        .onDrop(of: [UTType.fileURL.identifier], isTargeted: $model.isDropTargeted) { providers in
+            model.handleDrop(providers: providers)
+        }
         .onAppear {
             applyProfile(profile)
+        }
+        .onChange(of: model.activeItemID) { _ in
+            syncPunchSession()
+        }
+        .onChange(of: model.results.count) { _ in
+            syncPunchSession()
+        }
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button("Update") {
+                    showUpdateSheet = true
+                }
+
+                Picker("Profile", selection: $profile) {
+                    ForEach(CompressionProfile.allCases, id: \.self) { value in
+                        Text(value.label).tag(value)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 170)
+                .onChange(of: profile) { next in
+                    applyProfile(next)
+                }
+            }
         }
         .sheet(isPresented: $showUpdateSheet) {
             VStack(alignment: .leading, spacing: 12) {
@@ -728,329 +779,292 @@ struct ContentView: View {
         .sheet(item: $resizeTarget) { result in
             resizeSheet(for: result)
         }
-        .sheet(item: Binding<FolderSheetTarget?>(
-            get: { folderCropTarget.map(FolderSheetTarget.init(url:)) },
-            set: { folderCropTarget = $0?.url }
-        )) { target in
-            folderCropSheet(for: target.url)
-        }
-        .sheet(item: Binding<FolderSheetTarget?>(
-            get: { folderResizeTarget.map(FolderSheetTarget.init(url:)) },
-            set: { folderResizeTarget = $0?.url }
-        )) { target in
-            folderResizeSheet(for: target.url)
-        }
     }
 
-    private var topBar: some View {
+    private var appSurface: some View {
         ZStack {
-            Text("Pixel Crusher")
-                .font(.headline.weight(.semibold))
-
-            HStack {
-                Button("Updates") {
-                    showUpdateSheet = true
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
-                Spacer()
-
-                Picker("Profile", selection: $profile) {
-                    ForEach(CompressionProfile.allCases, id: \.self) { value in
-                        Text(value.label).tag(value)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: colorScheme == .dark
+                    ? NSColor(calibratedWhite: 0.12, alpha: 0.86)
+                    : NSColor(calibratedWhite: 0.96, alpha: 0.88)
+                ))
+                .overlay {
+                    if !isEmptyState {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(Color.black.opacity(colorScheme == .dark ? 0.65 : 0.18), lineWidth: 1)
                     }
                 }
-                .pickerStyle(.menu)
-                .frame(width: 170)
-                .onChange(of: profile) { next in
-                    applyProfile(next)
+                .shadow(color: Color.black.opacity(isEmptyState ? 0 : (colorScheme == .dark ? 0.35 : 0.2)), radius: 20, x: 0, y: 12)
+
+            VStack(spacing: 0) {
+                mainPane
+
+                if showBottomHint {
+                    bottomHintBar
                 }
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(isEmptyState ? 0 : 24)
     }
 
     private var mainPane: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                if isEmptyState {
-                    emptyDropZone
-                } else {
-                    compactDropZone
-                    queuePanel
-                    folderPanel
-                    resultsPanel
-                }
-            }
-            .padding(16)
-        }
-    }
-
-    private var emptyDropZone: some View {
-        PaneCard {
-            VStack(spacing: 10) {
-                Spacer(minLength: 20)
-                Image(systemName: "arrow.down.circle")
-                    .font(.system(size: 34))
-                    .foregroundStyle(model.isDropTargeted ? Color.accentColor : Color.secondary)
-
-                Text("Drop images to crush")
-                    .font(.title3.weight(.semibold))
-
-                Text("PNG · JPG · SVG · GIF")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Button("Browse") {
-                    model.chooseFiles()
-                }
-                .buttonStyle(.borderedProminent)
-
-                Button("Browse Folder") {
-                    model.chooseFolder()
-                }
-                .buttonStyle(.bordered)
-
-                Spacer(minLength: 20)
-            }
-            .frame(maxWidth: .infinity, minHeight: 360)
-        }
-        .onDrop(of: [UTType.fileURL.identifier], isTargeted: $model.isDropTargeted) { providers in
-            model.handleDrop(providers: providers)
-        }
-    }
-
-    private var compactDropZone: some View {
-        PaneCard {
-            HStack {
-                Text("Add more files or folders")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("Browse") {
-                    model.chooseFiles()
-                }
-                .buttonStyle(.bordered)
-
-                Button("Browse Folder") {
-                    model.chooseFolder()
-                }
-                .buttonStyle(.bordered)
-            }
-        }
-        .onDrop(of: [UTType.fileURL.identifier], isTargeted: $model.isDropTargeted) { providers in
-            model.handleDrop(providers: providers)
-        }
-    }
-
-    private var queuePanel: some View {
-        PaneCard {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Queue")
-                        .font(.headline)
-                    Spacer()
-                    Text("\(model.completedCount) / \(model.totalCount) done")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                ProgressView(value: model.overallProgress)
-                    .progressViewStyle(.linear)
-
-                HStack {
-                    Text(model.activeItemName ?? "Queue idle")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    Spacer()
-                    Text(queuePercentText)
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-    }
-
-    private var folderPanel: some View {
-        PaneCard {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Folders")
-                        .font(.headline)
-                    Spacer()
-                    Text("\(model.folderRoots.count) root(s)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                if model.folderRoots.isEmpty {
-                    Text("Drop or browse a folder to show nested items.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(model.folderRoots, id: \.path) { root in
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack {
-                                Text(root.lastPathComponent)
-                                    .font(.subheadline.weight(.semibold))
-                                Spacer()
-                                Button("Folder Crop") {
-                                    folderCropTarget = root
-                                    folderCropPreset = "1024"
-                                    folderCropAnchor = model.cropAnchor
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-
-                                Button("Folder Resize") {
-                                    folderResizeTarget = root
-                                    folderResizePreset = "1024"
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                            }
-
-                            if let summary = folderBatchSummary[root.path] {
-                                Text(summary)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            let entries = nestedEntries(for: root)
-                            if entries.isEmpty {
-                                Text("No queued files yet")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                ForEach(entries, id: \.id) { entry in
-                                    HStack(spacing: 4) {
-                                        Text(entry.isFolder ? "▸" : "•")
-                                            .foregroundStyle(.secondary)
-                                        Text(entry.name)
-                                            .lineLimit(1)
-                                        Spacer(minLength: 0)
-                                    }
-                                    .padding(.leading, CGFloat(entry.depth) * 12)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                }
+        Group {
+            if isEmptyState {
+                emptyStatePane
+            } else {
+                ScrollView {
+                    VStack(spacing: 14) {
+                        if !processedItems.isEmpty {
+                            ForEach(processedItems) { result in
+                                resultRow(for: result)
                             }
                         }
-                        .padding(8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.35))
-                        )
-                    }
-                }
-            }
-        }
-    }
 
-    private var resultsPanel: some View {
-        PaneCard {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Items")
-                        .font(.headline)
-                    Spacer()
-                    Button("Reveal Output Folder") {
-                        model.openLatestOutputFolder()
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(!model.results.contains(where: { $0.outputURL != nil }))
-                }
+                        if let active = punchSession {
+                            punchSection(for: active)
+                        } else if model.isQueueRunning {
+                            idleProcessingSection
+                        }
 
-                ForEach(Array(model.results.reversed())) { result in
-                    HStack(alignment: .center, spacing: 10) {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.accentColor.opacity(0.2))
-                            .frame(width: 36, height: 36)
-                            .overlay(
-                                Text(String(result.inputURL.lastPathComponent.prefix(1)).uppercased())
-                                    .font(.caption.weight(.semibold))
-                            )
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(result.inputURL.lastPathComponent)
-                                .font(.subheadline.weight(.semibold))
-                                .lineLimit(1)
-
-                            Text(result.detailText ?? result.statusText)
-                                .font(.caption2)
+                        if processedItems.isEmpty && !model.isQueueRunning && punchSession == nil {
+                            Text("Add files to start crushing.")
+                                .font(.subheadline)
                                 .foregroundStyle(.secondary)
-                                .lineLimit(1)
-
-                            if let summary = itemSummary[result.id] {
-                                Text(summary)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
+                                .padding(.vertical, 24)
                         }
-
-                        Spacer()
-
-                        Text(statusLabel(for: result.state))
-                            .font(.caption2.weight(.semibold))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(statusColor(for: result.state).opacity(0.15), in: Capsule())
-                            .foregroundStyle(statusColor(for: result.state))
-
-                        if let delta = sizeDeltaBadge(for: result) {
-                            Text(delta.text)
-                                .font(.caption2.weight(.semibold))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(delta.color.opacity(0.15), in: Capsule())
-                                .foregroundStyle(delta.color)
-                        }
-
-                        Button("Crop") {
-                            cropTarget = result
-                            cropDraftWidth = model.fixedCropWidth
-                            cropDraftHeight = model.fixedCropHeight
-                            cropDraftAnchor = model.cropAnchor
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-
-                        Button("Resize") {
-                            resizeTarget = result
-                            resizeDraftWidth = ""
-                            resizeDraftHeight = ""
-                            resizeDraftLock = true
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
                     }
-                    .padding(8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color(nsColor: .controlBackgroundColor).opacity(0.32))
-                    )
+                    .padding(16)
                 }
+                .background(Color(nsColor: colorScheme == .dark
+                    ? NSColor(calibratedWhite: 0.07, alpha: 0.82)
+                    : NSColor(calibratedWhite: 0.92, alpha: 0.82)
+                ))
             }
         }
+    }
+
+    private var emptyStatePane: some View {
+        ZStack {
+            Color(nsColor: colorScheme == .dark
+                ? NSColor(calibratedWhite: 0.14, alpha: 0.74)
+                : NSColor(calibratedWhite: 0.86, alpha: 0.76)
+            )
+
+            VStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .fill(Color.white.opacity(colorScheme == .dark ? 0.08 : 0.45))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                                .foregroundStyle(Color.secondary.opacity(0.35))
+                        )
+                        .frame(width: 124, height: 124)
+
+                    Image(systemName: "icloud.and.arrow.up")
+                        .font(.system(size: 44, weight: .regular))
+                        .foregroundStyle(.secondary.opacity(0.7))
+                }
+
+                Text("Drag & Drop images here")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Text("or")
+                    .font(.title3)
+                    .foregroundStyle(.secondary.opacity(0.8))
+
+                Button("Browse Files") {
+                    model.chooseFiles()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private var idleProcessingSection: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.small)
+
+            Text("Processing \(model.activeItemName ?? "queued images")…")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .center)
+        .padding(.vertical, 20)
+    }
+
+    private func punchSection(for session: PunchSession) -> some View {
+        VStack(spacing: 10) {
+            PunchEffectView(inputURL: session.inputURL) {
+                guard punchSession?.id == session.id else {
+                    return
+                }
+                playedPunchIDs.insert(session.id)
+                punchSession = nil
+            }
+            .id(session.id)
+            .frame(width: 280, height: 240)
+
+            Text("Crushing \(session.inputURL.lastPathComponent)…")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+
+    private func resultRow(for result: ProcessingResult) -> some View {
+        HStack(alignment: .center, spacing: 14) {
+            ResultThumbnail(url: result.inputURL)
+                .frame(width: 74, height: 74)
+
+            VStack(alignment: .leading, spacing: 7) {
+                Text(result.inputURL.lastPathComponent)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.86) : Color.primary)
+                    .lineLimit(1)
+
+                HStack(spacing: 8) {
+                    Text(formatBytes(result.inputBytes))
+                        .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.55) : .secondary)
+
+                    Image(systemName: "arrow.right")
+                        .font(.caption2)
+                        .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.5) : .secondary)
+
+                    Text(formatBytes(result.outputBytes))
+                        .foregroundStyle(result.state == .done ? Color.green.opacity(0.92) : .secondary)
+                        .fontWeight(result.state == .done ? .semibold : .regular)
+
+                    if let delta = sizeDelta(for: result) {
+                        Text(delta.text)
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(delta.color.opacity(0.16), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                            .foregroundStyle(delta.color)
+                    }
+                }
+                .font(.system(size: 12, weight: .medium))
+            }
+
+            Spacer(minLength: 8)
+
+            HStack(spacing: 8) {
+                actionGlyphButton(symbol: "crop", help: "Crop image") {
+                    cropTarget = result
+                    cropDraftWidth = model.fixedCropWidth
+                    cropDraftHeight = model.fixedCropHeight
+                    cropDraftAnchor = model.cropAnchor
+                }
+
+                actionGlyphButton(symbol: "arrow.up.left.and.arrow.down.right", help: "Resize image") {
+                    resizeTarget = result
+                    resizeDraftWidth = ""
+                    resizeDraftHeight = ""
+                    resizeDraftLock = true
+                }
+            }
+
+            Image(systemName: result.state == .done ? "checkmark.circle" : "exclamationmark.circle")
+                .foregroundStyle(result.state == .done ? Color.green.opacity(0.92) : Color.orange)
+                .font(.system(size: 24, weight: .medium))
+                .frame(width: 24)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(nsColor: colorScheme == .dark
+                    ? NSColor(calibratedWhite: 0.17, alpha: 0.92)
+                    : NSColor(calibratedWhite: 1.0, alpha: 1)
+                ))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.white.opacity(colorScheme == .dark ? 0.1 : 0.08), lineWidth: 1)
+        )
+        .animation(.easeOut(duration: 0.25), value: result.state)
+    }
+
+    private var bottomHintBar: some View {
+        HStack(spacing: 8) {
+            Text("Drag and drop to process more images")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if model.isQueueRunning {
+                Text("•")
+                    .foregroundStyle(.secondary)
+                Text("\(model.completedCount)/\(model.totalCount) done")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 30)
+        .background(
+            LinearGradient(
+                gradient: Gradient(colors: [
+                    Color(nsColor: colorScheme == .dark
+                        ? NSColor(calibratedWhite: 0.19, alpha: 0.94)
+                        : NSColor(calibratedWhite: 0.95, alpha: 1)
+                    ),
+                    Color(nsColor: colorScheme == .dark
+                        ? NSColor(calibratedWhite: 0.14, alpha: 0.94)
+                        : NSColor(calibratedWhite: 0.9, alpha: 1)
+                    )
+                ]),
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+        )
+        .overlay(alignment: .top) {
+            Divider().opacity(0.5)
+        }
+    }
+
+    private func actionGlyphButton(symbol: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.82) : Color.primary)
+                .frame(width: 40, height: 40)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.white.opacity(colorScheme == .dark ? 0.03 : 0.9))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.white.opacity(colorScheme == .dark ? 0.2 : 0.12), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 
     private var dragOverlay: some View {
-        RoundedRectangle(cornerRadius: 20, style: .continuous)
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
             .strokeBorder(style: StrokeStyle(lineWidth: 3, dash: [10]))
             .foregroundStyle(Color.accentColor.opacity(0.8))
             .background(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(Color.accentColor.opacity(0.15))
             )
             .overlay(
-                Text("Drop to add files")
-                    .font(.headline)
-                    .foregroundStyle(Color.accentColor)
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.down.circle.fill")
+                    Text("Drop to crush")
+                        .fontWeight(.semibold)
+                }
+                .font(.headline)
+                .foregroundStyle(Color.accentColor)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 10)
+                .background(.regularMaterial, in: Capsule())
             )
-            .padding(20)
+            .padding(30)
             .allowsHitTesting(false)
     }
 
@@ -1080,91 +1094,54 @@ struct ContentView: View {
         }
     }
 
-    private func nestedEntries(for root: URL) -> [FolderTreeEntry] {
-        let rootPath = root.path
-
-        var folderSet: Set<String> = []
-        var fileSet: Set<String> = []
-
-        for inputPath in model.results.map(\.inputURL.path).filter({ $0.hasPrefix(rootPath) }) {
-            var relative = String(inputPath.dropFirst(rootPath.count))
-            relative = relative.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard !relative.isEmpty else { continue }
-
-            let segments = relative.split(separator: "/").map(String.init)
-            if segments.count > 1 {
-                for index in 0..<(segments.count - 1) {
-                    let folder = segments[0...index].joined(separator: "/")
-                    folderSet.insert(folder)
-                }
-            }
-            fileSet.insert(relative)
-        }
-
-        var entries: [FolderTreeEntry] = []
-
-        for folder in folderSet.sorted() {
-            let depth = max(0, folder.split(separator: "/").count - 1)
-            let name = folder.split(separator: "/").last.map(String.init) ?? folder
-            entries.append(FolderTreeEntry(id: "f:\(folder)", name: name, depth: depth, isFolder: true))
-        }
-
-        for file in fileSet.sorted() {
-            let depth = max(0, file.split(separator: "/").count - 1)
-            let name = file.split(separator: "/").last.map(String.init) ?? file
-            entries.append(FolderTreeEntry(id: "i:\(file)", name: name, depth: depth, isFolder: false))
-        }
-
-        return entries
-    }
-
-    private func statusLabel(for state: ProcessingItemState) -> String {
-        switch state {
-        case .queued:
-            return "Queued"
-        case .preparing:
-            return "Preparing"
-        case .optimizing:
-            return "Optimizing"
-        case .saving:
-            return "Saving"
-        case .done:
-            return "Done"
-        case .failed:
-            return "Failed"
-        }
-    }
-
-    private func statusColor(for state: ProcessingItemState) -> Color {
-        switch state {
-        case .done:
-            return .green
-        case .failed:
-            return .red
-        case .queued:
-            return .secondary
-        default:
-            return .orange
-        }
-    }
-
-    private func sizeDeltaBadge(for result: ProcessingResult) -> (text: String, color: Color)? {
-        guard let detail = result.detailText,
-              let range = detail.range(of: #"\([+-]\d+\.\d%\)"#, options: .regularExpression) else {
+    private func sizeDelta(for result: ProcessingResult) -> (text: String, color: Color)? {
+        guard let inputBytes = result.inputBytes,
+              let outputBytes = result.outputBytes,
+              inputBytes > 0 else {
             return nil
         }
 
-        let token = String(detail[range].dropFirst().dropLast())
+        let delta = (Double(outputBytes) - Double(inputBytes)) / Double(inputBytes)
+        let absolute = Int((abs(delta) * 100.0).rounded())
 
-        if token.hasPrefix("-") {
-            return (token, .green)
+        if delta < 0 {
+            return ("-\(absolute)%", .green)
         }
 
-        if token.hasPrefix("+") {
-            return (token, .red)
+        if delta > 0 {
+            return ("+\(absolute)%", .red)
         }
 
-        return (token, .secondary)
+        return ("0%", .secondary)
+    }
+
+    private func formatBytes(_ bytes: Int64?) -> String {
+        guard let bytes, bytes > 0 else {
+            return "—"
+        }
+
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        formatter.includesUnit = true
+        formatter.isAdaptive = true
+        return formatter.string(fromByteCount: bytes)
+    }
+
+    private func syncPunchSession() {
+        guard let activeID = model.activeItemID else {
+            return
+        }
+
+        if punchSession?.id == activeID || playedPunchIDs.contains(activeID) {
+            return
+        }
+
+        guard let result = model.results.first(where: { $0.id == activeID }) else {
+            return
+        }
+
+        punchSession = PunchSession(id: activeID, inputURL: result.inputURL)
     }
 
     private func cropSheet(for result: ProcessingResult) -> some View {
@@ -1243,94 +1220,438 @@ struct ContentView: View {
         .padding(18)
         .frame(width: 360)
     }
+}
 
-    private func folderCropSheet(for folder: URL) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Folder crop settings")
-                .font(.headline)
-            Text(folder.lastPathComponent)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+private struct WindowAppearanceConfigurator: NSViewRepresentable {
+    let opacity: CGFloat
 
-            Picker("Size", selection: $folderCropPreset) {
-                ForEach(sizePresets, id: \.id) { preset in
-                    Text(preset.label).tag(preset.id)
-                }
-            }
-            .pickerStyle(.menu)
-
-            Picker("Anchor", selection: $folderCropAnchor) {
-                Text("Center").tag(CropAnchor.center)
-                Text("Top Left").tag(CropAnchor.topLeft)
-                Text("Top Right").tag(CropAnchor.topRight)
-                Text("Bottom Left").tag(CropAnchor.bottomLeft)
-                Text("Bottom Right").tag(CropAnchor.bottomRight)
-            }
-            .pickerStyle(.menu)
-
-            HStack {
-                Spacer()
-                Button("Cancel") {
-                    folderCropTarget = nil
-                }
-                Button("Apply to Folder") {
-                    if let preset = sizePresets.first(where: { $0.id == folderCropPreset }) {
-                        model.fixedCropEnabled = preset.id != "original"
-                        model.fixedCropWidth = preset.width
-                        model.fixedCropHeight = preset.height
-                        model.cropAnchor = folderCropAnchor
-                        folderBatchSummary[folder.path] = "Crop \(preset.label) · Anchor \(folderCropAnchor.rawValue)"
-                    }
-                    folderCropTarget = nil
-                }
-                .buttonStyle(.borderedProminent)
-            }
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            apply(to: view.window)
         }
-        .padding(18)
-        .frame(width: 360)
+        return view
     }
 
-    private func folderResizeSheet(for folder: URL) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Folder resize settings")
-                .font(.headline)
-            Text(folder.lastPathComponent)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Picker("Size", selection: $folderResizePreset) {
-                ForEach(sizePresets, id: \.id) { preset in
-                    Text(preset.label).tag(preset.id)
-                }
-            }
-            .pickerStyle(.menu)
-
-            Toggle("Lock aspect ratio", isOn: $folderResizeLock)
-
-            HStack {
-                Spacer()
-                Button("Cancel") {
-                    folderResizeTarget = nil
-                }
-                Button("Apply to Folder") {
-                    if let preset = sizePresets.first(where: { $0.id == folderResizePreset }) {
-                        folderBatchSummary[folder.path] = "Resize \(preset.label) · Lock \(folderResizeLock ? "on" : "off")"
-                    }
-                    folderResizeTarget = nil
-                }
-                .buttonStyle(.borderedProminent)
-            }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            apply(to: nsView.window)
         }
-        .padding(18)
-        .frame(width: 360)
+    }
+
+    private func apply(to window: NSWindow?) {
+        guard let window else {
+            return
+        }
+
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.alphaValue = opacity
     }
 }
 
-private struct FolderTreeEntry {
-    let id: String
-    let name: String
-    let depth: Int
-    let isFolder: Bool
+private struct WindowBlurBackdrop: NSViewRepresentable {
+    let material: NSVisualEffectView.Material
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = material
+        view.blendingMode = .behindWindow
+        view.state = .active
+        view.isEmphasized = true
+        return view
+    }
+
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        nsView.material = material
+        nsView.blendingMode = .behindWindow
+        nsView.state = .active
+    }
+}
+
+private struct PunchSession: Equatable {
+    let id: UUID
+    let inputURL: URL
+}
+
+private struct ResultThumbnail: View {
+    let url: URL
+
+    var body: some View {
+        Group {
+            if let image = NSImage(contentsOf: url) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                ZStack {
+                    Color.secondary.opacity(0.15)
+                    Image(systemName: "photo")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.black.opacity(0.12), lineWidth: 1)
+        )
+    }
+}
+
+private struct PunchEffectView: View {
+    let inputURL: URL
+    let onComplete: () -> Void
+
+    @State private var animator: PunchAnimator?
+    @State private var didFinish = false
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: didFinish)) { timeline in
+            Canvas { context, size in
+                guard let animator else {
+                    return
+                }
+
+                let finished = animator.render(into: &context, at: timeline.date, canvasSize: size)
+                if finished && !didFinish {
+                    DispatchQueue.main.async {
+                        guard !didFinish else { return }
+                        didFinish = true
+                        onComplete()
+                    }
+                }
+            }
+        }
+        .onAppear {
+            animator = PunchAnimator(inputURL: inputURL)
+            didFinish = false
+        }
+    }
+}
+
+private struct PunchBlock {
+    let x: CGFloat
+    let y: CGFloat
+    let size: CGFloat
+    let color: Color
+}
+
+private struct PunchParticle {
+    var x: CGFloat
+    var y: CGFloat
+    var vx: CGFloat
+    var vy: CGFloat
+    var size: CGFloat
+    var color: Color
+}
+
+private final class PunchAnimator {
+    private let sampler: PunchColorSampler?
+    private let fistImage: CGImage?
+    private var cornerBlocks: [PunchBlock] = []
+    private var bodyBlocks: [PunchBlock] = []
+    private var particles: [PunchParticle] = []
+
+    private var startDate: Date?
+    private var lastTickDate: Date?
+    private var phase = 0
+    private var completed = false
+
+    init(inputURL: URL) {
+        self.sampler = PunchColorSampler(fileURL: inputURL)
+        self.fistImage = Self.loadFistImage()
+        buildBlockMap()
+    }
+
+    func render(into context: inout GraphicsContext, at date: Date, canvasSize: CGSize) -> Bool {
+        if startDate == nil {
+            startDate = date
+            lastTickDate = date
+        }
+
+        guard let startDate else {
+            return false
+        }
+
+        let elapsed = date.timeIntervalSince(startDate)
+        let dt = min(max(date.timeIntervalSince(lastTickDate ?? date), 1.0 / 120.0), 1.0 / 20.0)
+        lastTickDate = date
+
+        if elapsed >= 4.0 {
+            completed = true
+        }
+
+        triggerPhasesIfNeeded(elapsed: elapsed, canvasSize: canvasSize)
+        stepParticles(deltaTime: dt, canvasSize: canvasSize)
+        drawScene(context: &context, elapsed: elapsed, canvasSize: canvasSize)
+
+        return completed
+    }
+
+    private func drawScene(context: inout GraphicsContext, elapsed: TimeInterval, canvasSize: CGSize) {
+        let imgW: CGFloat = 160
+        let imgH: CGFloat = 160
+        let imgX = (canvasSize.width - imgW) * 0.5
+        let imgY: CGFloat = 48
+
+        let alpha: CGFloat
+        if elapsed > 3.5 {
+            alpha = max(0, 1 - CGFloat((elapsed - 3.5) / 0.5))
+        } else {
+            alpha = 1
+        }
+
+        let shakeRange = (elapsed > 1.0 && elapsed < 1.15) || (elapsed > 2.2 && elapsed < 2.3)
+        let shakeX = shakeRange ? CGFloat.random(in: -5...5) : 0
+        let shakeY = shakeRange ? CGFloat.random(in: -5...5) : 0
+
+        var transformed = context
+        transformed.opacity = alpha
+        transformed.translateBy(x: shakeX, y: shakeY)
+
+        if elapsed < 1.0 {
+            let pixelSize = elapsed < 0.6 ? 1 + CGFloat(elapsed / 0.6) * 7 : 8
+            drawPixelatedImage(
+                context: &transformed,
+                imageX: imgX,
+                imageY: imgY,
+                imageW: imgW,
+                imageH: imgH,
+                pixelSize: pixelSize
+            )
+        } else if elapsed < 2.2 {
+            for block in bodyBlocks {
+                let rect = CGRect(
+                    x: imgX + block.x,
+                    y: imgY + block.y,
+                    width: block.size,
+                    height: block.size
+                )
+                transformed.fill(Path(rect), with: .color(block.color))
+            }
+        }
+
+        if elapsed > 0.6 && elapsed <= 2.2 {
+            drawFist(context: &transformed, elapsed: elapsed, imageY: imgY, canvasWidth: canvasSize.width)
+        }
+
+        for particle in particles {
+            let rect = CGRect(x: particle.x, y: particle.y, width: particle.size, height: particle.size)
+            context.fill(Path(rect), with: .color(particle.color))
+        }
+    }
+
+    private func drawPixelatedImage(
+        context: inout GraphicsContext,
+        imageX: CGFloat,
+        imageY: CGFloat,
+        imageW: CGFloat,
+        imageH: CGFloat,
+        pixelSize: CGFloat
+    ) {
+        let step = max(1, Int(pixelSize.rounded()))
+
+        for y in stride(from: 0, to: Int(imageH), by: step) {
+            for x in stride(from: 0, to: Int(imageW), by: step) {
+                let nx = (CGFloat(x) + CGFloat(step) * 0.5) / imageW
+                let ny = (CGFloat(y) + CGFloat(step) * 0.5) / imageH
+                let color = sampler?.color(atNormalizedX: nx, y: ny) ?? Color.accentColor
+                let rect = CGRect(
+                    x: imageX + CGFloat(x),
+                    y: imageY + CGFloat(y),
+                    width: CGFloat(step),
+                    height: CGFloat(step)
+                )
+                context.fill(Path(rect), with: .color(color))
+            }
+        }
+    }
+
+    private func drawFist(context: inout GraphicsContext, elapsed: TimeInterval, imageY: CGFloat, canvasWidth: CGFloat) {
+        let fistW: CGFloat = 100
+        let fistH: CGFloat = 140
+        let fistX = (canvasWidth - fistW) * 0.5
+        let targetY = imageY - fistH + 25
+
+        let fistY: CGFloat
+        if elapsed > 0.6 && elapsed <= 1.0 {
+            let p = CGFloat((elapsed - 0.6) / 0.4)
+            fistY = -fistH + (targetY + fistH) * (p * p * p)
+        } else if elapsed <= 1.6 {
+            fistY = targetY
+        } else {
+            let p = CGFloat((elapsed - 1.6) / 0.6)
+            fistY = targetY - (targetY + fistH) * (p * p)
+        }
+
+        if let fistImage {
+            context.draw(
+                Image(decorative: fistImage, scale: 1),
+                in: CGRect(x: fistX, y: fistY, width: fistW, height: fistH)
+            )
+        } else {
+            let fist = Text("👊")
+                .font(.system(size: 82))
+            context.draw(fist, at: CGPoint(x: fistX + fistW * 0.5, y: fistY + fistH * 0.56), anchor: .center)
+        }
+    }
+
+    private func triggerPhasesIfNeeded(elapsed: TimeInterval, canvasSize: CGSize) {
+        let imageX = (canvasSize.width - 160) * 0.5
+        let imageY: CGFloat = 48
+
+        if elapsed >= 1.0 && phase == 0 {
+            phase = 1
+            for block in cornerBlocks {
+                particles.append(PunchParticle(
+                    x: imageX + block.x,
+                    y: imageY + block.y,
+                    vx: CGFloat.random(in: 1...7),
+                    vy: CGFloat.random(in: -2...2),
+                    size: block.size,
+                    color: block.color
+                ))
+            }
+        }
+
+        if elapsed >= 2.2 && phase == 1 {
+            phase = 2
+            for block in bodyBlocks {
+                particles.append(PunchParticle(
+                    x: imageX + block.x,
+                    y: imageY + block.y,
+                    vx: CGFloat.random(in: -4...4),
+                    vy: CGFloat.random(in: -4...1),
+                    size: block.size,
+                    color: block.color
+                ))
+            }
+        }
+    }
+
+    private func stepParticles(deltaTime: TimeInterval, canvasSize: CGSize) {
+        let floorY = canvasSize.height - 15
+        let frameFactor = CGFloat(deltaTime * 60.0)
+
+        for index in particles.indices {
+            particles[index].vy += 0.8 * frameFactor
+            particles[index].x += particles[index].vx * frameFactor
+            particles[index].y += particles[index].vy * frameFactor
+
+            if particles[index].y > floorY - particles[index].size {
+                particles[index].y = floorY - particles[index].size
+                particles[index].vy *= -0.3
+                particles[index].vx *= 0.7
+            }
+        }
+    }
+
+    private func buildBlockMap() {
+        let blockSize: CGFloat = 8
+        let cols = 20
+        let rows = 20
+
+        for row in 0..<rows {
+            for col in 0..<cols {
+                let x = CGFloat(col) * blockSize
+                let y = CGFloat(row) * blockSize
+                let nx = (x + blockSize * 0.5) / 160
+                let ny = (y + blockSize * 0.5) / 160
+                let color = sampler?.color(atNormalizedX: nx, y: ny) ?? Color.blue
+                let block = PunchBlock(x: x, y: y, size: blockSize, color: color)
+                let noise = Double.random(in: -2...2)
+
+                if Double(row + col) + noise > 27 {
+                    cornerBlocks.append(block)
+                } else {
+                    bodyBlocks.append(block)
+                }
+            }
+        }
+    }
+
+    private static func loadFistImage() -> CGImage? {
+        let bundled = Bundle.main.url(forResource: "fist", withExtension: "png")
+        let local = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("fist.png")
+        let candidates = [bundled, local].compactMap { $0 }
+
+        for url in candidates {
+            guard let image = NSImage(contentsOf: url),
+                  let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+                continue
+            }
+            return cgImage
+        }
+
+        return nil
+    }
+}
+
+private final class PunchColorSampler {
+    private let width: Int
+    private let height: Int
+    private let rgba: [UInt8]
+
+    init?(fileURL: URL) {
+        guard let image = NSImage(contentsOf: fileURL),
+              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return nil
+        }
+
+        let width = cgImage.width
+        let height = cgImage.height
+
+        var storage = [UInt8](repeating: 0, count: width * height * 4)
+        let bytesPerRow = width * 4
+
+        let rendered = storage.withUnsafeMutableBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress,
+                  let context = CGContext(
+                    data: baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                  ) else {
+                return false
+            }
+
+            context.interpolationQuality = .high
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+
+        guard rendered else {
+            return nil
+        }
+
+        self.width = width
+        self.height = height
+        self.rgba = storage
+    }
+
+    func color(atNormalizedX x: CGFloat, y: CGFloat) -> Color {
+        let clampedX = min(max(x, 0), 1)
+        let clampedY = min(max(y, 0), 1)
+
+        let px = Int(clampedX * CGFloat(max(width - 1, 0)))
+        let py = Int((1 - clampedY) * CGFloat(max(height - 1, 0)))
+        let index = ((py * width) + px) * 4
+
+        guard index >= 0, index + 3 < rgba.count else {
+            return .blue
+        }
+
+        return Color(
+            red: Double(rgba[index]) / 255.0,
+            green: Double(rgba[index + 1]) / 255.0,
+            blue: Double(rgba[index + 2]) / 255.0,
+            opacity: Double(rgba[index + 3]) / 255.0
+        )
+    }
 }
 
 private enum CompressionProfile: CaseIterable {
@@ -1350,40 +1671,9 @@ private enum CompressionProfile: CaseIterable {
     }
 }
 
-private struct FolderSheetTarget: Identifiable {
-    let id: String
-    let url: URL
-
-    init(url: URL) {
-        self.url = url
-        self.id = url.path
-    }
-}
-
-private struct PaneCard<Content: View>: View {
-    @ViewBuilder private let content: Content
-
-    init(@ViewBuilder content: () -> Content) {
-        self.content = content()
-    }
-
-    var body: some View {
-        content
-            .padding(14)
-            .background(
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.52))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
-            )
-    }
-}
-
 struct PixelCrusherDesktopApp: App {
     var body: some Scene {
-        WindowGroup {
+        WindowGroup("Pixel Crusher") {
             ContentView()
         }
         .windowResizability(.automatic)
