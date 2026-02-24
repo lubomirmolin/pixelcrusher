@@ -650,7 +650,7 @@ struct ContentView: View {
     @StateObject private var model = AppViewModel()
 
     @State private var profile: CompressionProfile = .balanced
-    @State private var showAdvanced = false
+    @State private var showUpdateSheet = false
 
     @State private var cropTarget: ProcessingResult?
     @State private var resizeTarget: ProcessingResult?
@@ -690,27 +690,38 @@ struct ContentView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            topBar
-
-            HStack(spacing: 0) {
-                mainPane
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
+        ZStack {
+            VStack(spacing: 0) {
+                topBar
                 Divider()
-
-                sidebarPane
-                    .frame(width: 360)
-                    .frame(maxHeight: .infinity)
+                mainPane
             }
 
-            Divider()
-
-            footerStatusRow
+            if model.isDropTargeted {
+                dragOverlay
+            }
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .preferredColorScheme(.dark)
-        .frame(minWidth: 1080, minHeight: 700)
+        .frame(minWidth: 980, minHeight: 680)
+        .onAppear {
+            applyProfile(profile)
+        }
+        .sheet(isPresented: $showUpdateSheet) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Updates")
+                        .font(.headline)
+                    Spacer()
+                    Button("Done") {
+                        showUpdateSheet = false
+                    }
+                    .buttonStyle(.bordered)
+                }
+                UpdateOptionsCard()
+            }
+            .padding(16)
+            .frame(width: 460)
+        }
         .sheet(item: $cropTarget) { result in
             cropSheet(for: result)
         }
@@ -732,26 +743,29 @@ struct ContentView: View {
     }
 
     private var topBar: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Pixel Crusher")
-                    .font(.title3.weight(.semibold))
-                Text("Clean batch workflow for files and folders")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+        ZStack {
+            Text("Pixel Crusher")
+                .font(.headline.weight(.semibold))
 
-            Spacer()
-
-            Picker("Profile", selection: $profile) {
-                ForEach(CompressionProfile.allCases, id: \.self) { value in
-                    Text(value.label).tag(value)
+            HStack {
+                Button("Updates") {
+                    showUpdateSheet = true
                 }
-            }
-            .pickerStyle(.menu)
-            .frame(width: 170)
-            .onChange(of: profile) { next in
-                applyProfile(next)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Spacer()
+
+                Picker("Profile", selection: $profile) {
+                    ForEach(CompressionProfile.allCases, id: \.self) { value in
+                        Text(value.label).tag(value)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 170)
+                .onChange(of: profile) { next in
+                    applyProfile(next)
+                }
             }
         }
         .padding(.horizontal, 16)
@@ -774,55 +788,34 @@ struct ContentView: View {
         }
     }
 
-    private var sidebarPane: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                DisclosureGroup("Advanced controls", isExpanded: $showAdvanced) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        generalOptionsGroup
-                        dimensionsOptionsGroup
-                        optimizerOptionsGroup
-                        UpdateOptionsCard()
-                    }
-                    .padding(.top, 8)
-                }
-                .font(.subheadline.weight(.medium))
-            }
-            .padding(14)
-        }
-        .background(Color(nsColor: .underPageBackgroundColor).opacity(0.35))
-    }
-
     private var emptyDropZone: some View {
         PaneCard {
-            VStack(spacing: 12) {
-                Spacer(minLength: 24)
-                Image(systemName: "arrow.down.doc")
-                    .font(.system(size: 30))
+            VStack(spacing: 10) {
+                Spacer(minLength: 20)
+                Image(systemName: "arrow.down.circle")
+                    .font(.system(size: 34))
                     .foregroundStyle(model.isDropTargeted ? Color.accentColor : Color.secondary)
 
-                Text("Drop files to crush")
+                Text("Drop images to crush")
                     .font(.title3.weight(.semibold))
 
                 Text("PNG · JPG · SVG · GIF")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                HStack(spacing: 8) {
-                    Button("Browse Files") {
-                        model.chooseFiles()
-                    }
-                    .buttonStyle(.borderedProminent)
-
-                    Button("Browse Folder") {
-                        model.chooseFolder()
-                    }
-                    .buttonStyle(.bordered)
+                Button("Browse") {
+                    model.chooseFiles()
                 }
+                .buttonStyle(.borderedProminent)
 
-                Spacer(minLength: 24)
+                Button("Browse Folder") {
+                    model.chooseFolder()
+                }
+                .buttonStyle(.bordered)
+
+                Spacer(minLength: 20)
             }
-            .frame(maxWidth: .infinity, minHeight: 320)
+            .frame(maxWidth: .infinity, minHeight: 360)
         }
         .onDrop(of: [UTType.fileURL.identifier], isTargeted: $model.isDropTargeted) { providers in
             model.handleDrop(providers: providers)
@@ -836,10 +829,11 @@ struct ContentView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("Browse Files") {
+                Button("Browse") {
                     model.chooseFiles()
                 }
                 .buttonStyle(.bordered)
+
                 Button("Browse Folder") {
                     model.chooseFolder()
                 }
@@ -853,7 +847,7 @@ struct ContentView: View {
 
     private var queuePanel: some View {
         PaneCard {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("Queue")
                         .font(.headline)
@@ -884,16 +878,16 @@ struct ContentView: View {
         PaneCard {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("Folder workflow")
+                    Text("Folders")
                         .font(.headline)
                     Spacer()
-                    Text("\(model.folderRoots.count) roots")
+                    Text("\(model.folderRoots.count) root(s)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
                 if model.folderRoots.isEmpty {
-                    Text("Drop or browse a folder to enable nested batch controls.")
+                    Text("Drop or browse a folder to show nested items.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
@@ -910,6 +904,7 @@ struct ContentView: View {
                                 }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
+
                                 Button("Folder Resize") {
                                     folderResizeTarget = root
                                     folderResizePreset = "1024"
@@ -926,21 +921,28 @@ struct ContentView: View {
 
                             let entries = nestedEntries(for: root)
                             if entries.isEmpty {
-                                Text("No queued/processed files from this folder yet")
+                                Text("No queued files yet")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             } else {
-                                ForEach(entries, id: \.self) { entry in
-                                    Text("• \(entry)")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
+                                ForEach(entries, id: \.id) { entry in
+                                    HStack(spacing: 4) {
+                                        Text(entry.isFolder ? "▸" : "•")
+                                            .foregroundStyle(.secondary)
+                                        Text(entry.name)
+                                            .lineLimit(1)
+                                        Spacer(minLength: 0)
+                                    }
+                                    .padding(.leading, CGFloat(entry.depth) * 12)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
                                 }
                             }
                         }
                         .padding(8)
                         .background(
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.38))
+                                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.35))
                         )
                     }
                 }
@@ -952,7 +954,7 @@ struct ContentView: View {
         PaneCard {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("Processed items")
+                    Text("Items")
                         .font(.headline)
                     Spacer()
                     Button("Reveal Output Folder") {
@@ -965,8 +967,8 @@ struct ContentView: View {
                 ForEach(Array(model.results.reversed())) { result in
                     HStack(alignment: .center, spacing: 10) {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.accentColor.opacity(0.22))
-                            .frame(width: 34, height: 34)
+                            .fill(Color.accentColor.opacity(0.2))
+                            .frame(width: 36, height: 36)
                             .overlay(
                                 Text(String(result.inputURL.lastPathComponent.prefix(1)).uppercased())
                                     .font(.caption.weight(.semibold))
@@ -977,9 +979,10 @@ struct ContentView: View {
                                 .font(.subheadline.weight(.semibold))
                                 .lineLimit(1)
 
-                            Text(result.statusText)
+                            Text(result.detailText ?? result.statusText)
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
+                                .lineLimit(1)
 
                             if let summary = itemSummary[result.id] {
                                 Text(summary)
@@ -990,12 +993,19 @@ struct ContentView: View {
 
                         Spacer()
 
+                        Text(statusLabel(for: result.state))
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(statusColor(for: result.state).opacity(0.15), in: Capsule())
+                            .foregroundStyle(statusColor(for: result.state))
+
                         if let delta = sizeDeltaBadge(for: result) {
                             Text(delta.text)
                                 .font(.caption2.weight(.semibold))
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 3)
-                                .background(delta.color.opacity(0.18), in: Capsule())
+                                .background(delta.color.opacity(0.15), in: Capsule())
                                 .foregroundStyle(delta.color)
                         }
 
@@ -1020,131 +1030,28 @@ struct ContentView: View {
                     .padding(8)
                     .background(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color(nsColor: .controlBackgroundColor).opacity(0.36))
+                            .fill(Color(nsColor: .controlBackgroundColor).opacity(0.32))
                     )
                 }
             }
         }
     }
 
-    private var generalOptionsGroup: some View {
-        PaneCard {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("General")
+    private var dragOverlay: some View {
+        RoundedRectangle(cornerRadius: 20, style: .continuous)
+            .strokeBorder(style: StrokeStyle(lineWidth: 3, dash: [10]))
+            .foregroundStyle(Color.accentColor.opacity(0.8))
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.15))
+            )
+            .overlay(
+                Text("Drop to add files")
                     .font(.headline)
-                Toggle("Auto-trim empty space", isOn: $model.autoTrimTransparentBorders)
-                Toggle("Overwrite original files", isOn: $model.overwriteOriginal)
-            }
-        }
-    }
-
-    private var dimensionsOptionsGroup: some View {
-        PaneCard {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Dimensions")
-                    .font(.headline)
-
-                Toggle("Enable fixed crop", isOn: $model.fixedCropEnabled)
-
-                HStack {
-                    Text("Width")
-                    Spacer()
-                    TextField("1024", text: $model.fixedCropWidth)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 90)
-                        .multilineTextAlignment(.trailing)
-                        .disabled(!model.fixedCropEnabled)
-                }
-
-                HStack {
-                    Text("Height")
-                    Spacer()
-                    TextField("1024", text: $model.fixedCropHeight)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 90)
-                        .multilineTextAlignment(.trailing)
-                        .disabled(!model.fixedCropEnabled)
-                }
-
-                Picker("Anchor", selection: $model.cropAnchor) {
-                    Text("Center").tag(CropAnchor.center)
-                    Text("Top Left").tag(CropAnchor.topLeft)
-                    Text("Top Right").tag(CropAnchor.topRight)
-                    Text("Bottom Left").tag(CropAnchor.bottomLeft)
-                    Text("Bottom Right").tag(CropAnchor.bottomRight)
-                }
-                .pickerStyle(.menu)
-                .disabled(!model.fixedCropEnabled)
-            }
-        }
-    }
-
-    private var optimizerOptionsGroup: some View {
-        PaneCard {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("Optimizers")
-                        .font(.headline)
-                    Spacer()
-                    Button("Refresh tools") {
-                        model.refreshToolAvailability()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-
-                HStack {
-                    Text("JPEG quality")
-                    Spacer()
-                    Text("\(Int(model.jpegQualityPercent.rounded()))%")
-                        .font(.system(.body, design: .monospaced))
-                }
-                Slider(value: $model.jpegQualityPercent, in: 1...100, step: 1)
-
-                Toggle("PNG lossy (pngquant)", isOn: $model.pngLossyEnabled)
-                Toggle("PNG crush", isOn: $model.pngUsePNGCrush)
-                Toggle("PNG zopfli", isOn: $model.pngUseZopfli)
-                Toggle("PNGOUT", isOn: $model.pngUsePNGOUT)
-
-                ForEach(model.toolStatuses, id: \.tool.rawValue) { status in
-                    HStack(spacing: 6) {
-                        Image(systemName: status.isAvailable ? "checkmark.circle.fill" : "xmark.circle")
-                            .foregroundStyle(status.isAvailable ? .green : .secondary)
-                            .font(.caption)
-                        Text(status.tool.displayName)
-                            .font(.caption)
-                        Spacer()
-                        Text(sourceLabel(for: status.source))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-    }
-
-    private var footerStatusRow: some View {
-        HStack(spacing: 10) {
-            Label("Queue", systemImage: model.isQueueRunning ? "gearshape.2.fill" : "clock")
-                .font(.caption.weight(.medium))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(Capsule().fill(Color.white.opacity(0.1)))
-
-            Text(model.isQueueRunning ? "Processing \(model.completedCount)/\(model.totalCount)" : "Ready")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Text(model.bundledDiagnosticsLine)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-
-            Spacer()
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.bar)
+                    .foregroundStyle(Color.accentColor)
+            )
+            .padding(20)
+            .allowsHitTesting(false)
     }
 
     private func applyProfile(_ profile: CompressionProfile) {
@@ -1156,7 +1063,7 @@ struct ContentView: View {
             model.pngLossyQualityMax = 90
             model.pngUsePNGCrush = true
             model.pngUseZopfli = false
-        case .qualityFirst:
+        case .high:
             model.jpegQualityPercent = 92
             model.pngLossyEnabled = false
             model.pngLossyQualityMin = 75
@@ -1173,21 +1080,72 @@ struct ContentView: View {
         }
     }
 
-    private func nestedEntries(for root: URL) -> [String] {
+    private func nestedEntries(for root: URL) -> [FolderTreeEntry] {
         let rootPath = root.path
-        return model.results
-            .map(\.inputURL.path)
-            .filter { $0.hasPrefix(rootPath) }
-            .map { path in
-                let relative = String(path.dropFirst(rootPath.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                return relative.isEmpty ? basename(path) : relative
+
+        var folderSet: Set<String> = []
+        var fileSet: Set<String> = []
+
+        for inputPath in model.results.map(\.inputURL.path).filter({ $0.hasPrefix(rootPath) }) {
+            var relative = String(inputPath.dropFirst(rootPath.count))
+            relative = relative.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard !relative.isEmpty else { continue }
+
+            let segments = relative.split(separator: "/").map(String.init)
+            if segments.count > 1 {
+                for index in 0..<(segments.count - 1) {
+                    let folder = segments[0...index].joined(separator: "/")
+                    folderSet.insert(folder)
+                }
             }
-            .prefix(8)
-            .map { $0 }
+            fileSet.insert(relative)
+        }
+
+        var entries: [FolderTreeEntry] = []
+
+        for folder in folderSet.sorted() {
+            let depth = max(0, folder.split(separator: "/").count - 1)
+            let name = folder.split(separator: "/").last.map(String.init) ?? folder
+            entries.append(FolderTreeEntry(id: "f:\(folder)", name: name, depth: depth, isFolder: true))
+        }
+
+        for file in fileSet.sorted() {
+            let depth = max(0, file.split(separator: "/").count - 1)
+            let name = file.split(separator: "/").last.map(String.init) ?? file
+            entries.append(FolderTreeEntry(id: "i:\(file)", name: name, depth: depth, isFolder: false))
+        }
+
+        return entries
     }
 
-    private func basename(_ path: String) -> String {
-        URL(fileURLWithPath: path).lastPathComponent
+    private func statusLabel(for state: ProcessingItemState) -> String {
+        switch state {
+        case .queued:
+            return "Queued"
+        case .preparing:
+            return "Preparing"
+        case .optimizing:
+            return "Optimizing"
+        case .saving:
+            return "Saving"
+        case .done:
+            return "Done"
+        case .failed:
+            return "Failed"
+        }
+    }
+
+    private func statusColor(for state: ProcessingItemState) -> Color {
+        switch state {
+        case .done:
+            return .green
+        case .failed:
+            return .red
+        case .queued:
+            return .secondary
+        default:
+            return .orange
+        }
     }
 
     private func sizeDeltaBadge(for result: ProcessingResult) -> (text: String, color: Color)? {
@@ -1207,19 +1165,6 @@ struct ContentView: View {
         }
 
         return (token, .secondary)
-    }
-
-    private func sourceLabel(for source: OptimizerToolResolutionSource?) -> String {
-        switch source {
-        case .bundled:
-            return "bundled"
-        case .hostPath:
-            return "host"
-        case .environmentOverride:
-            return "env"
-        case nil:
-            return "detected"
-        }
     }
 
     private func cropSheet(for result: ProcessingResult) -> some View {
@@ -1381,17 +1326,24 @@ struct ContentView: View {
     }
 }
 
+private struct FolderTreeEntry {
+    let id: String
+    let name: String
+    let depth: Int
+    let isFolder: Bool
+}
+
 private enum CompressionProfile: CaseIterable {
     case balanced
-    case qualityFirst
+    case high
     case smallest
 
     var label: String {
         switch self {
         case .balanced:
             return "Balanced"
-        case .qualityFirst:
-            return "Quality First"
+        case .high:
+            return "High Quality"
         case .smallest:
             return "Smallest Size"
         }
