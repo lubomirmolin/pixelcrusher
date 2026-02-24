@@ -675,6 +675,7 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var model = AppViewModel()
     private let windowOpacity: CGFloat = 1.0
+    private let processingScrollBottomID = "processing-scroll-bottom"
 
     @State private var profile: CompressionProfile = .balanced
     @State private var showUpdateSheet = false
@@ -712,12 +713,12 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            WindowBlurBackdrop(material: colorScheme == .dark ? .hudWindow : .underWindowBackground)
+            WindowBlurBackdrop(material: .windowBackground)
                 .ignoresSafeArea()
 
             Color(nsColor: colorScheme == .dark
-                ? NSColor(calibratedWhite: 0.0, alpha: 0.24)
-                : NSColor(calibratedWhite: 1.0, alpha: 0.08)
+                ? NSColor(calibratedWhite: 0.0, alpha: 0.34)
+                : NSColor(calibratedWhite: 1.0, alpha: 0.16)
             )
             .ignoresSafeArea()
 
@@ -746,6 +747,11 @@ struct ContentView: View {
                 Button("Update") {
                     showUpdateSheet = true
                 }
+
+                Toggle("Autocrop", isOn: $model.autoTrimTransparentBorders)
+                    .toggleStyle(.checkbox)
+                    .controlSize(.small)
+                    .help("Trim transparent borders automatically during processing")
 
                 Picker("Profile", selection: $profile) {
                     ForEach(CompressionProfile.allCases, id: \.self) { value in
@@ -784,29 +790,13 @@ struct ContentView: View {
     }
 
     private var appSurface: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(nsColor: colorScheme == .dark
-                    ? NSColor(calibratedWhite: 0.12, alpha: 0.86)
-                    : NSColor(calibratedWhite: 0.96, alpha: 0.88)
-                ))
-                .overlay {
-                    if !isEmptyState {
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .stroke(Color.black.opacity(colorScheme == .dark ? 0.65 : 0.18), lineWidth: 1)
-                    }
-                }
-                .shadow(color: Color.black.opacity(isEmptyState ? 0 : (colorScheme == .dark ? 0.35 : 0.2)), radius: 20, x: 0, y: 12)
+        VStack(spacing: 0) {
+            mainPane
 
-            VStack(spacing: 0) {
-                mainPane
-
-                if showBottomHint {
-                    bottomHintBar
-                }
+            if showBottomHint {
+                bottomHintBar
             }
         }
-        .padding(isEmptyState ? 0 : 24)
     }
 
     private var mainPane: some View {
@@ -814,33 +804,53 @@ struct ContentView: View {
             if isEmptyState {
                 emptyStatePane
             } else {
-                ScrollView {
-                    VStack(spacing: 14) {
-                        if !processedItems.isEmpty {
-                            ForEach(processedItems) { result in
-                                resultRow(for: result)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(spacing: 14) {
+                            if !processedItems.isEmpty {
+                                ForEach(processedItems) { result in
+                                    resultRow(for: result)
+                                }
                             }
-                        }
 
-                        if let active = punchSession {
-                            punchSection(for: active)
-                        } else if model.isQueueRunning {
-                            idleProcessingSection
-                        }
+                            if let active = punchSession {
+                                punchSection(for: active)
+                            } else if model.isQueueRunning {
+                                idleProcessingSection
+                            }
 
-                        if processedItems.isEmpty && !model.isQueueRunning && punchSession == nil {
-                            Text("Add files to start crushing.")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                                .padding(.vertical, 24)
+                            if processedItems.isEmpty && !model.isQueueRunning && punchSession == nil {
+                                Text("Add files to start crushing.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                    .padding(.vertical, 24)
+                            }
+
+                            Color.clear
+                                .frame(height: 1)
+                                .id(processingScrollBottomID)
                         }
+                        .padding(16)
                     }
-                    .padding(16)
+                    .onChange(of: model.results.count) { _ in
+                        scrollToProcessingBottom(proxy)
+                    }
+                    .onChange(of: punchSession?.id) { _ in
+                        scrollToProcessingBottom(proxy)
+                    }
                 }
                 .background(Color(nsColor: colorScheme == .dark
                     ? NSColor(calibratedWhite: 0.07, alpha: 0.82)
                     : NSColor(calibratedWhite: 0.92, alpha: 0.82)
                 ))
+            }
+        }
+    }
+
+    private func scrollToProcessingBottom(_ proxy: ScrollViewProxy) {
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.2)) {
+                proxy.scrollTo(processingScrollBottomID, anchor: .bottom)
             }
         }
     }
@@ -921,7 +931,6 @@ struct ContentView: View {
     private func resultRow(for result: ProcessingResult) -> some View {
         HStack(alignment: .center, spacing: 14) {
             ResultThumbnail(url: result.inputURL)
-                .frame(width: 74, height: 74)
 
             VStack(alignment: .leading, spacing: 7) {
                 Text(result.inputURL.lastPathComponent)
@@ -977,7 +986,7 @@ struct ContentView: View {
                 .frame(width: 24)
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 14)
+        .padding(.vertical, 12)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(Color(nsColor: colorScheme == .dark
@@ -1258,16 +1267,17 @@ private struct WindowBlurBackdrop: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
         view.material = material
-        view.blendingMode = .behindWindow
+        view.blendingMode = .withinWindow
         view.state = .active
-        view.isEmphasized = true
+        view.isEmphasized = false
         return view
     }
 
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
         nsView.material = material
-        nsView.blendingMode = .behindWindow
+        nsView.blendingMode = .withinWindow
         nsView.state = .active
+        nsView.isEmphasized = false
     }
 }
 
@@ -1280,19 +1290,24 @@ private struct ResultThumbnail: View {
     let url: URL
 
     var body: some View {
-        Group {
+        ZStack {
             if let image = PixelCrusherImageLoader.orientedNSImage(from: url) {
                 Image(nsImage: image)
                     .resizable()
-                    .scaledToFill()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .clipped()
             } else {
                 ZStack {
                     Color.secondary.opacity(0.15)
                     Image(systemName: "photo")
                         .foregroundStyle(.secondary)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .frame(width: 74, height: 74)
+        .clipped()
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -1686,7 +1701,7 @@ private final class PunchColorSampler {
         let clampedY = min(max(y, 0), 1)
 
         let px = Int(clampedX * CGFloat(max(width - 1, 0)))
-        let py = Int((1 - clampedY) * CGFloat(max(height - 1, 0)))
+        let py = Int(clampedY * CGFloat(max(height - 1, 0)))
         let index = ((py * width) + px) * 4
 
         guard index >= 0, index + 3 < rgba.count else {
