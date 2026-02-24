@@ -3,6 +3,8 @@ import AppKit
 import UniformTypeIdentifiers
 import PixelCrusherMacCore
 import Foundation
+import ImageIO
+import CoreImage
 
 struct ProcessingResult: Identifiable {
     let id: UUID
@@ -1279,7 +1281,7 @@ private struct ResultThumbnail: View {
 
     var body: some View {
         Group {
-            if let image = NSImage(contentsOf: url) {
+            if let image = PixelCrusherImageLoader.orientedNSImage(from: url) {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFill()
@@ -1333,7 +1335,8 @@ private struct PunchEffectView: View {
 private struct PunchBlock {
     let x: CGFloat
     let y: CGFloat
-    let size: CGFloat
+    let width: CGFloat
+    let height: CGFloat
     let color: Color
 }
 
@@ -1349,6 +1352,7 @@ private struct PunchParticle {
 private final class PunchAnimator {
     private let sampler: PunchColorSampler?
     private let fistImage: CGImage?
+    private let imageSize: CGSize
     private var cornerBlocks: [PunchBlock] = []
     private var bodyBlocks: [PunchBlock] = []
     private var particles: [PunchParticle] = []
@@ -1361,7 +1365,10 @@ private final class PunchAnimator {
     init(inputURL: URL) {
         self.sampler = PunchColorSampler(fileURL: inputURL)
         self.fistImage = Self.loadFistImage()
-        buildBlockMap()
+        let maxDimension: CGFloat = 160
+        let aspectRatio = self.sampler?.aspectRatio ?? 1
+        self.imageSize = Self.fittedImageSize(maxDimension: maxDimension, aspectRatio: aspectRatio)
+        buildBlockMap(imageWidth: imageSize.width, imageHeight: imageSize.height)
     }
 
     func render(into context: inout GraphicsContext, at date: Date, canvasSize: CGSize) -> Bool {
@@ -1390,10 +1397,11 @@ private final class PunchAnimator {
     }
 
     private func drawScene(context: inout GraphicsContext, elapsed: TimeInterval, canvasSize: CGSize) {
-        let imgW: CGFloat = 160
-        let imgH: CGFloat = 160
-        let imgX = (canvasSize.width - imgW) * 0.5
-        let imgY: CGFloat = 48
+        let imageFrame = imageFrame(in: canvasSize)
+        let imgW = imageFrame.width
+        let imgH = imageFrame.height
+        let imgX = imageFrame.minX
+        let imgY = imageFrame.minY
 
         let alpha: CGFloat
         if elapsed > 3.5 {
@@ -1425,8 +1433,8 @@ private final class PunchAnimator {
                 let rect = CGRect(
                     x: imgX + block.x,
                     y: imgY + block.y,
-                    width: block.size,
-                    height: block.size
+                    width: block.width,
+                    height: block.height
                 )
                 transformed.fill(Path(rect), with: .color(block.color))
             }
@@ -1452,16 +1460,25 @@ private final class PunchAnimator {
     ) {
         let step = max(1, Int(pixelSize.rounded()))
 
-        for y in stride(from: 0, to: Int(imageH), by: step) {
-            for x in stride(from: 0, to: Int(imageW), by: step) {
-                let nx = (CGFloat(x) + CGFloat(step) * 0.5) / imageW
-                let ny = (CGFloat(y) + CGFloat(step) * 0.5) / imageH
+        let maxY = Int(ceil(imageH))
+        let maxX = Int(ceil(imageW))
+
+        for y in stride(from: 0, to: maxY, by: step) {
+            for x in stride(from: 0, to: maxX, by: step) {
+                let cellW = min(CGFloat(step), imageW - CGFloat(x))
+                let cellH = min(CGFloat(step), imageH - CGFloat(y))
+                guard cellW > 0, cellH > 0 else {
+                    continue
+                }
+
+                let nx = min(max((CGFloat(x) + cellW * 0.5) / imageW, 0), 1)
+                let ny = min(max((CGFloat(y) + cellH * 0.5) / imageH, 0), 1)
                 let color = sampler?.color(atNormalizedX: nx, y: ny) ?? Color.accentColor
                 let rect = CGRect(
                     x: imageX + CGFloat(x),
                     y: imageY + CGFloat(y),
-                    width: CGFloat(step),
-                    height: CGFloat(step)
+                    width: cellW,
+                    height: cellH
                 )
                 context.fill(Path(rect), with: .color(color))
             }
@@ -1498,8 +1515,9 @@ private final class PunchAnimator {
     }
 
     private func triggerPhasesIfNeeded(elapsed: TimeInterval, canvasSize: CGSize) {
-        let imageX = (canvasSize.width - 160) * 0.5
-        let imageY: CGFloat = 48
+        let imageFrame = imageFrame(in: canvasSize)
+        let imageX = imageFrame.minX
+        let imageY = imageFrame.minY
 
         if elapsed >= 1.0 && phase == 0 {
             phase = 1
@@ -1509,7 +1527,7 @@ private final class PunchAnimator {
                     y: imageY + block.y,
                     vx: CGFloat.random(in: 1...7),
                     vy: CGFloat.random(in: -2...2),
-                    size: block.size,
+                    size: max(2, min(block.width, block.height)),
                     color: block.color
                 ))
             }
@@ -1523,7 +1541,7 @@ private final class PunchAnimator {
                     y: imageY + block.y,
                     vx: CGFloat.random(in: -4...4),
                     vy: CGFloat.random(in: -4...1),
-                    size: block.size,
+                    size: max(2, min(block.width, block.height)),
                     color: block.color
                 ))
             }
@@ -1547,28 +1565,55 @@ private final class PunchAnimator {
         }
     }
 
-    private func buildBlockMap() {
+    private func buildBlockMap(imageWidth: CGFloat, imageHeight: CGFloat) {
         let blockSize: CGFloat = 8
-        let cols = 20
-        let rows = 20
+        let cols = max(1, Int(ceil(imageWidth / blockSize)))
+        let rows = max(1, Int(ceil(imageHeight / blockSize)))
 
         for row in 0..<rows {
             for col in 0..<cols {
                 let x = CGFloat(col) * blockSize
                 let y = CGFloat(row) * blockSize
-                let nx = (x + blockSize * 0.5) / 160
-                let ny = (y + blockSize * 0.5) / 160
+                let blockWidth = min(blockSize, imageWidth - x)
+                let blockHeight = min(blockSize, imageHeight - y)
+                guard blockWidth > 0, blockHeight > 0 else {
+                    continue
+                }
+
+                let nx = min(max((x + blockWidth * 0.5) / imageWidth, 0), 1)
+                let ny = min(max((y + blockHeight * 0.5) / imageHeight, 0), 1)
                 let color = sampler?.color(atNormalizedX: nx, y: ny) ?? Color.blue
-                let block = PunchBlock(x: x, y: y, size: blockSize, color: color)
+                let block = PunchBlock(
+                    x: x,
+                    y: y,
+                    width: blockWidth,
+                    height: blockHeight,
+                    color: color
+                )
                 let noise = Double.random(in: -2...2)
 
-                if Double(row + col) + noise > 27 {
+                if Double(row + col) + noise > (Double(rows + cols) * 0.67) {
                     cornerBlocks.append(block)
                 } else {
                     bodyBlocks.append(block)
                 }
             }
         }
+    }
+
+    private func imageFrame(in canvasSize: CGSize) -> CGRect {
+        let containerHeight: CGFloat = 160
+        let x = (canvasSize.width - imageSize.width) * 0.5
+        let y = 48 + (containerHeight - imageSize.height) * 0.5
+        return CGRect(x: x, y: y, width: imageSize.width, height: imageSize.height)
+    }
+
+    private static func fittedImageSize(maxDimension: CGFloat, aspectRatio: CGFloat) -> CGSize {
+        let clampedAspect = max(aspectRatio, 0.01)
+        if clampedAspect >= 1 {
+            return CGSize(width: maxDimension, height: maxDimension / clampedAspect)
+        }
+        return CGSize(width: maxDimension * clampedAspect, height: maxDimension)
     }
 
     private static func loadFistImage() -> CGImage? {
@@ -1592,10 +1637,13 @@ private final class PunchColorSampler {
     private let width: Int
     private let height: Int
     private let rgba: [UInt8]
+    var aspectRatio: CGFloat {
+        guard height > 0 else { return 1 }
+        return CGFloat(width) / CGFloat(height)
+    }
 
     init?(fileURL: URL) {
-        guard let image = NSImage(contentsOf: fileURL),
-              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+        guard let cgImage = PixelCrusherImageLoader.orientedCGImage(from: fileURL) else {
             return nil
         }
 
@@ -1651,6 +1699,34 @@ private final class PunchColorSampler {
             blue: Double(rgba[index + 2]) / 255.0,
             opacity: Double(rgba[index + 3]) / 255.0
         )
+    }
+}
+
+private enum PixelCrusherImageLoader {
+    static func orientedNSImage(from url: URL) -> NSImage? {
+        guard let cgImage = orientedCGImage(from: url) else {
+            return nil
+        }
+        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+    }
+
+    static func orientedCGImage(from url: URL) -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            return nil
+        }
+
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let orientationRaw = (properties?[kCGImagePropertyOrientation] as? UInt32) ?? 1
+        let orientation = CGImagePropertyOrientation(rawValue: orientationRaw) ?? .up
+
+        guard orientation != .up else {
+            return image
+        }
+
+        let ciImage = CIImage(cgImage: image).oriented(orientation)
+        let ciContext = CIContext(options: nil)
+        return ciContext.createCGImage(ciImage, from: ciImage.extent)
     }
 }
 
