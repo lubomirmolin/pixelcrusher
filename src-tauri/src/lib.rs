@@ -139,8 +139,9 @@ fn install_downloaded_update(
 
                 return Ok(UpdateInstallResult {
                     mode: "launched-and-exit".to_string(),
-                    message: "Installer launched. PixelCrusher will close so the update can continue."
-                        .to_string(),
+                    message:
+                        "Installer launched. PixelCrusher will close so the update can continue."
+                            .to_string(),
                     command: None,
                 });
             }
@@ -226,7 +227,10 @@ fn install_downloaded_update(
         let _ = app;
         let _ = asset_kind;
         let _ = installer_path;
-        Err("In-app installer launch is not supported on this platform for the Tauri build.".to_string())
+        Err(
+            "In-app installer launch is not supported on this platform for the Tauri build."
+                .to_string(),
+        )
     }
 }
 
@@ -240,6 +244,14 @@ fn select_input_files() -> Vec<String> {
         .into_iter()
         .map(|path| path.display().to_string())
         .collect()
+}
+
+#[tauri::command]
+fn select_input_folder() -> Option<String> {
+    FileDialog::new()
+        .set_title("Select folder with images")
+        .pick_folder()
+        .map(|path| path.display().to_string())
 }
 
 #[tauri::command]
@@ -481,7 +493,9 @@ fn is_trusted_release_asset_url(url: &Url, owner: &str, repo: &str) -> bool {
     };
 
     if host == "github.com" {
-        return url.path().contains(&format!("/{owner}/{repo}/releases/download/"));
+        return url
+            .path()
+            .contains(&format!("/{owner}/{repo}/releases/download/"));
     }
 
     host == "objects.githubusercontent.com"
@@ -503,7 +517,9 @@ fn validate_downloaded_installer_path(installer_path: &Path) -> Result<(), Strin
 
     let trusted_root = std::env::temp_dir().join("pixelcrusher-updater");
     if !canonical_path.starts_with(&trusted_root) {
-        return Err("Refusing to launch installer outside PixelCrusher updater temp directory.".to_string());
+        return Err(
+            "Refusing to launch installer outside PixelCrusher updater temp directory.".to_string(),
+        );
     }
 
     Ok(())
@@ -699,27 +715,86 @@ fn normalize_input_paths(paths: Vec<String>) -> Result<Vec<String>, String> {
             continue;
         }
 
-        if !original.is_file() {
-            log::warn!("Rejected enqueue path (not a file): {}", trimmed);
+        if original.is_file() {
+            push_if_supported_file(&original, &mut accepted, &mut seen);
             continue;
         }
 
-        let normalized = std::fs::canonicalize(&original).unwrap_or(original);
-        let key = normalized.to_string_lossy().to_string();
-
-        if seen.insert(key.clone()) {
-            accepted.push(key);
+        if original.is_dir() {
+            collect_supported_files_from_dir(&original, &mut accepted, &mut seen);
+            continue;
         }
+
+        log::warn!("Rejected enqueue path (unsupported type): {}", trimmed);
     }
 
     if accepted.is_empty() {
         return Err(
-            "No valid file paths were provided. Drag files into the app window or use the system file picker."
+            "No valid file paths were provided. Drag files/folders into the app window or use the system picker."
                 .to_string(),
         );
     }
 
     Ok(accepted)
+}
+
+fn collect_supported_files_from_dir(
+    root: &Path,
+    accepted: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            log::warn!(
+                "Unable to enumerate directory for enqueue {}: {}",
+                root.display(),
+                error
+            );
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_supported_files_from_dir(&path, accepted, seen);
+            continue;
+        }
+
+        if path.is_file() {
+            push_if_supported_file(&path, accepted, seen);
+        }
+    }
+}
+
+fn push_if_supported_file(path: &Path, accepted: &mut Vec<String>, seen: &mut HashSet<String>) {
+    if !is_supported_image_path(path) {
+        log::warn!(
+            "Skipped enqueue path with unsupported extension: {}",
+            path.display()
+        );
+        return;
+    }
+
+    let normalized = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let key = normalized.to_string_lossy().to_string();
+
+    if seen.insert(key.clone()) {
+        accepted.push(key);
+    }
+}
+
+fn is_supported_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "svg" | "gif"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn trim_recent(state: &Arc<RuntimeState>) {
@@ -789,6 +864,7 @@ pub fn run() {
             recent_results,
             reveal_in_finder,
             select_input_files,
+            select_input_folder,
             app_version,
             runtime_platform,
             open_external_url,
@@ -829,6 +905,28 @@ mod tests {
     }
 
     #[test]
+    fn normalize_input_paths_expands_directories_recursively() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+
+        let png = root.join("a.png");
+        let jpeg = nested.join("b.jpeg");
+        let txt = nested.join("notes.txt");
+
+        fs::write(&png, b"fake-png").unwrap();
+        fs::write(&jpeg, b"fake-jpeg").unwrap();
+        fs::write(&txt, b"ignore-me").unwrap();
+
+        let normalized = normalize_input_paths(vec![root.display().to_string()]).unwrap();
+
+        assert_eq!(normalized.len(), 2);
+        assert!(normalized.iter().any(|path| path.ends_with("a.png")));
+        assert!(normalized.iter().any(|path| path.ends_with("b.jpeg")));
+    }
+
+    #[test]
     fn trusted_release_asset_url_allows_expected_hosts_only() {
         let trusted = Url::parse(
             "https://github.com/lubomirmolin/pixelcrusher/releases/download/v1.2.3/PixelCrusher_1.2.3_x64-setup.exe",
@@ -836,8 +934,16 @@ mod tests {
         .unwrap();
         let untrusted = Url::parse("https://example.com/PixelCrusher_1.2.3_x64-setup.exe").unwrap();
 
-        assert!(is_trusted_release_asset_url(&trusted, RELEASE_OWNER, RELEASE_REPO));
-        assert!(!is_trusted_release_asset_url(&untrusted, RELEASE_OWNER, RELEASE_REPO));
+        assert!(is_trusted_release_asset_url(
+            &trusted,
+            RELEASE_OWNER,
+            RELEASE_REPO
+        ));
+        assert!(!is_trusted_release_asset_url(
+            &untrusted,
+            RELEASE_OWNER,
+            RELEASE_REPO
+        ));
     }
 
     #[test]

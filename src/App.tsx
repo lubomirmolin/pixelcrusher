@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { useEffect, useMemo, useReducer, useRef, useState, type CSSProperties } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
@@ -32,6 +32,21 @@ const TERMINAL_JOB_STATUSES = new Set(['completed', 'failed']);
 const RELEASES_LATEST_URL = 'https://api.github.com/repos/lubomirmolin/pixelcrusher/releases/latest';
 const RELEASES_PAGE_URL = 'https://github.com/lubomirmolin/pixelcrusher/releases';
 
+const SIZE_PRESETS = [
+  { value: 'original', label: 'Original size', width: null, height: null },
+  { value: '512', label: '512 × 512', width: 512, height: 512 },
+  { value: '1024', label: '1024 × 1024', width: 1024, height: 1024 },
+  { value: '2048', label: '2048 × 2048', width: 2048, height: 2048 },
+] as const;
+
+const CROP_ANCHORS = [
+  { value: 'center', label: 'Center' },
+  { value: 'top-left', label: 'Top left' },
+  { value: 'top-right', label: 'Top right' },
+  { value: 'bottom-left', label: 'Bottom left' },
+  { value: 'bottom-right', label: 'Bottom right' },
+] as const;
+
 type ReleasePayload = {
   tag_name?: string;
   html_url?: string;
@@ -50,6 +65,114 @@ type InstallUpdateResult = {
   command?: string;
 };
 
+type CompressionProfileId = 'balanced' | 'quality-first' | 'smallest' | 'custom';
+
+type ProfilePreset = {
+  id: CompressionProfileId;
+  label: string;
+  quality: number;
+  pngQMin: number;
+  pngQMax: number;
+  runPngQuant: boolean;
+  runPngcrush: boolean;
+  runZopfli: boolean;
+  runPngout: boolean;
+  trimTransparent: boolean;
+};
+
+const PROFILE_PRESETS: ProfilePreset[] = [
+  {
+    id: 'balanced',
+    label: 'Balanced',
+    quality: 82,
+    pngQMin: 60,
+    pngQMax: 90,
+    runPngQuant: true,
+    runPngcrush: true,
+    runZopfli: false,
+    runPngout: false,
+    trimTransparent: true,
+  },
+  {
+    id: 'quality-first',
+    label: 'Quality first',
+    quality: 92,
+    pngQMin: 75,
+    pngQMax: 98,
+    runPngQuant: false,
+    runPngcrush: true,
+    runZopfli: true,
+    runPngout: false,
+    trimTransparent: true,
+  },
+  {
+    id: 'smallest',
+    label: 'Smallest size',
+    quality: 70,
+    pngQMin: 45,
+    pngQMax: 75,
+    runPngQuant: true,
+    runPngcrush: true,
+    runZopfli: true,
+    runPngout: false,
+    trimTransparent: true,
+  },
+  {
+    id: 'custom',
+    label: 'Custom',
+    quality: 82,
+    pngQMin: 60,
+    pngQMax: 90,
+    runPngQuant: true,
+    runPngcrush: true,
+    runZopfli: false,
+    runPngout: false,
+    trimTransparent: true,
+  },
+];
+
+type ItemDescriptor = {
+  id: string;
+  inputPath: string;
+  outputPath?: string;
+  status: string;
+  progress: number;
+  inputSize?: number;
+  outputSize?: number;
+  sizeDeltaPercent?: number;
+};
+
+type CropSettings = {
+  width: string;
+  height: string;
+  anchor: (typeof CROP_ANCHORS)[number]['value'];
+};
+
+type ResizeSettings = {
+  width: string;
+  height: string;
+  lock: boolean;
+};
+
+type ItemAdjustments = {
+  crop?: CropSettings;
+  resize?: ResizeSettings;
+};
+
+type FolderBatchSettings = {
+  cropPreset?: (typeof SIZE_PRESETS)[number]['value'];
+  cropAnchor?: CropSettings['anchor'];
+  resizePreset?: (typeof SIZE_PRESETS)[number]['value'];
+  lockAspect?: boolean;
+};
+
+type FolderTreeNode = {
+  name: string;
+  path: string;
+  kind: 'folder' | 'file';
+  children: FolderTreeNode[];
+};
+
 function basename(filePath: string): string {
   const parts = filePath.split(/[\\/]/).filter(Boolean);
   return parts.at(-1) ?? filePath;
@@ -59,6 +182,10 @@ function dirname(filePath: string): string {
   const normalized = filePath.replace(/\\/g, '/');
   const index = normalized.lastIndexOf('/');
   return index > 0 ? normalized.slice(0, index) : normalized;
+}
+
+function normalizePathForMatch(path: string): string {
+  return path.replace(/\\/g, '/').replace(/\/+$/, '');
 }
 
 function asOptionalDimension(value: string): number | null {
@@ -79,6 +206,19 @@ function toHumanStatus(status: string): string {
     .split('_')
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ');
+}
+
+function formatDelta(delta?: number): string {
+  if (delta == null || Number.isNaN(delta)) {
+    return '—';
+  }
+
+  return `${delta > 0 ? '+' : ''}${delta.toFixed(1)}%`;
+}
+
+function isLikelyFolderPath(path: string): boolean {
+  const name = basename(path).toLowerCase();
+  return !['.png', '.jpg', '.jpeg', '.svg', '.gif'].some((ext) => name.endsWith(ext));
 }
 
 function isTauriRuntime(): boolean {
@@ -106,6 +246,128 @@ function normalizeReleasePageURL(candidate?: string): string {
   return RELEASES_PAGE_URL;
 }
 
+function buildFolderTree(roots: string[], filePaths: string[]): FolderTreeNode[] {
+  const normalizedFiles = filePaths.map((path) => normalizePathForMatch(path));
+
+  return roots.map((rootPath) => {
+    const normalizedRoot = normalizePathForMatch(rootPath);
+    const rootNode: FolderTreeNode = {
+      name: basename(rootPath),
+      path: rootPath,
+      kind: 'folder',
+      children: [],
+    };
+
+    const filesInRoot = normalizedFiles.filter(
+      (filePath) => filePath === normalizedRoot || filePath.startsWith(`${normalizedRoot}/`),
+    );
+
+    for (const filePath of filesInRoot) {
+      const relative = filePath.replace(`${normalizedRoot}/`, '');
+      const segments = relative.split('/').filter(Boolean);
+      if (!segments.length) {
+        continue;
+      }
+
+      let cursor = rootNode;
+      segments.forEach((segment, index) => {
+        const isLeaf = index === segments.length - 1;
+        const nextPath = `${cursor.path}/${segment}`;
+        let child = cursor.children.find((item) => item.name === segment && item.kind === (isLeaf ? 'file' : 'folder'));
+
+        if (!child) {
+          child = {
+            name: segment,
+            path: nextPath,
+            kind: isLeaf ? 'file' : 'folder',
+            children: [],
+          };
+          cursor.children.push(child);
+        }
+
+        cursor = child;
+      });
+    }
+
+    return rootNode;
+  });
+}
+
+function FolderTreeView({
+  node,
+  depth,
+  onOpenFolderCrop,
+  onOpenFolderResize,
+  folderBatch,
+}: {
+  node: FolderTreeNode;
+  depth: number;
+  onOpenFolderCrop: (path: string) => void;
+  onOpenFolderResize: (path: string) => void;
+  folderBatch: Record<string, FolderBatchSettings>;
+}) {
+  if (node.kind === 'file') {
+    return (
+      <li className="folder-leaf" style={{ '--depth': depth } as CSSProperties}>
+        <span>{node.name}</span>
+      </li>
+    );
+  }
+
+  const applied = folderBatch[node.path];
+
+  return (
+    <li className="folder-branch" style={{ '--depth': depth } as CSSProperties}>
+      <div className="folder-node-row">
+        <strong>{node.name}</strong>
+        <div className="folder-actions">
+          <button className="ghost-btn" onClick={() => onOpenFolderCrop(node.path)}>
+            Folder Crop
+          </button>
+          <button className="ghost-btn" onClick={() => onOpenFolderResize(node.path)}>
+            Folder Resize
+          </button>
+        </div>
+      </div>
+      {applied ? (
+        <p className="folder-batch-applied">
+          {applied.cropPreset ? `Crop ${applied.cropPreset === 'original' ? 'Original' : `${applied.cropPreset}×${applied.cropPreset}`}` : ''}
+          {applied.resizePreset
+            ? `${applied.cropPreset ? ' · ' : ''}Resize ${
+                applied.resizePreset === 'original' ? 'Original' : `${applied.resizePreset}×${applied.resizePreset}`
+              }`
+            : ''}
+          {applied.cropAnchor ? ` · Anchor ${applied.cropAnchor}` : ''}
+        </p>
+      ) : null}
+      {node.children.length > 0 ? (
+        <ul className="folder-subtree">
+          {node.children
+            .slice()
+            .sort((a, b) => {
+              if (a.kind !== b.kind) {
+                return a.kind === 'folder' ? -1 : 1;
+              }
+              return a.name.localeCompare(b.name);
+            })
+            .map((child) => (
+              <FolderTreeView
+                key={`${node.path}-${child.path}`}
+                node={child}
+                depth={depth + 1}
+                onOpenFolderCrop={onOpenFolderCrop}
+                onOpenFolderResize={onOpenFolderResize}
+                folderBatch={folderBatch}
+              />
+            ))}
+        </ul>
+      ) : (
+        <p className="folder-empty">No processed files yet.</p>
+      )}
+    </li>
+  );
+}
+
 function App() {
   const [queueState, dispatch] = useReducer(queueReducer, initialQueueState);
   const [diagnostics, setDiagnostics] = useState<ToolStatus[]>([]);
@@ -113,6 +375,9 @@ function App() {
   const [appVersion, setAppVersion] = useState('0.0.0');
   const [runtimePlatform, setRuntimePlatform] = useState<RuntimePlatform>('unknown');
   const [updateState, updateDispatch] = useReducer(updateReducer, { status: 'idle' } as UpdateFlowState);
+
+  const [profile, setProfile] = useState<CompressionProfileId>('balanced');
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const [trimTransparent, setTrimTransparent] = useState(true);
   const [cropWidth, setCropWidth] = useState('');
@@ -122,13 +387,54 @@ function App() {
   const [quality, setQuality] = useState(82);
   const [pngQMin, setPngQMin] = useState(60);
   const [pngQMax, setPngQMax] = useState(90);
-  const [runPngQuant, setRunPngQuant] = useState(false);
+  const [runPngQuant, setRunPngQuant] = useState(true);
   const [runPngcrush, setRunPngcrush] = useState(true);
   const [runZopfli, setRunZopfli] = useState(false);
   const [runPngout, setRunPngout] = useState(false);
 
+  const [folderRoots, setFolderRoots] = useState<string[]>([]);
+  const [itemAdjustments, setItemAdjustments] = useState<Record<string, ItemAdjustments>>({});
+  const [folderBatch, setFolderBatch] = useState<Record<string, FolderBatchSettings>>({});
+
+  const [activeCropItem, setActiveCropItem] = useState<ItemDescriptor | null>(null);
+  const [activeResizeItem, setActiveResizeItem] = useState<ItemDescriptor | null>(null);
+  const [activeFolderCropPath, setActiveFolderCropPath] = useState<string | null>(null);
+  const [activeFolderResizePath, setActiveFolderResizePath] = useState<string | null>(null);
+
+  const [cropDraft, setCropDraft] = useState<CropSettings>({
+    width: '',
+    height: '',
+    anchor: 'center',
+  });
+  const [resizeDraft, setResizeDraft] = useState<ResizeSettings>({
+    width: '',
+    height: '',
+    lock: true,
+  });
+
+  const [folderCropPreset, setFolderCropPreset] = useState<(typeof SIZE_PRESETS)[number]['value']>('original');
+  const [folderCropAnchor, setFolderCropAnchor] = useState<CropSettings['anchor']>('center');
+  const [folderResizePreset, setFolderResizePreset] = useState<(typeof SIZE_PRESETS)[number]['value']>('original');
+  const [folderResizeLock, setFolderResizeLock] = useState(true);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const optionsPayloadRef = useRef<Record<string, unknown> | null>(null);
+
+  useEffect(() => {
+    const preset = PROFILE_PRESETS.find((item) => item.id === profile);
+    if (!preset || preset.id === 'custom') {
+      return;
+    }
+
+    setTrimTransparent(preset.trimTransparent);
+    setQuality(preset.quality);
+    setPngQMin(preset.pngQMin);
+    setPngQMax(preset.pngQMax);
+    setRunPngQuant(preset.runPngQuant);
+    setRunPngcrush(preset.runPngcrush);
+    setRunZopfli(preset.runZopfli);
+    setRunPngout(preset.runPngout);
+  }, [profile]);
 
   useEffect(() => {
     invoke<ToolStatus[]>('startup_diagnostics').then(setDiagnostics).catch(() => undefined);
@@ -181,7 +487,9 @@ function App() {
 
           if (event.payload.type === 'drop') {
             setDragActive(false);
-            void enqueuePaths(event.payload.paths);
+            const dropped = event.payload.paths;
+            const guessedFolders = dropped.filter(isLikelyFolderPath);
+            void enqueuePaths(dropped, guessedFolders);
           }
         })
         .then((off) => {
@@ -210,6 +518,38 @@ function App() {
     [queueState.jobs],
   );
 
+  const resultItems = useMemo<ItemDescriptor[]>(
+    () =>
+      queueState.recent.map((item) => ({
+        id: item.id,
+        inputPath: item.input_path,
+        outputPath: item.output_path,
+        status: item.status,
+        progress: 100,
+        inputSize: item.input_size,
+        outputSize: item.output_size,
+        sizeDeltaPercent: item.size_delta_percent,
+      })),
+    [queueState.recent],
+  );
+
+  const resultIds = useMemo(() => new Set(resultItems.map((item) => item.id)), [resultItems]);
+
+  const activeOnlyItems = useMemo<ItemDescriptor[]>(
+    () =>
+      activeJobs
+        .filter((job) => !resultIds.has(job.id))
+        .map((job) => ({
+          id: job.id,
+          inputPath: job.input_path,
+          status: job.status,
+          progress: job.progress,
+        })),
+    [activeJobs, resultIds],
+  );
+
+  const visibleItems = useMemo(() => [...activeOnlyItems, ...resultItems], [activeOnlyItems, resultItems]);
+
   const currentJob = activeJobs[0] ?? null;
   const queueStateLabel = currentJob ? `${activeJobs.length} active` : 'idle';
   const queueMessage = currentJob ? currentJob.message || toHumanStatus(currentJob.status) : 'Queue is idle';
@@ -220,6 +560,11 @@ function App() {
     const latest = queueState.recent[0];
     return latest ? dirname(latest.output_path) : '';
   }, [queueState.recent]);
+
+  const folderTree = useMemo(
+    () => buildFolderTree(folderRoots, visibleItems.map((item) => item.inputPath)),
+    [folderRoots, visibleItems],
+  );
 
   const optionsPayload = useMemo(
     () => ({
@@ -260,7 +605,13 @@ function App() {
     optionsPayloadRef.current = optionsPayload;
   }, [optionsPayload]);
 
-  const enqueuePaths = async (paths: string[]) => {
+  const setCustomProfile = () => {
+    if (profile !== 'custom') {
+      setProfile('custom');
+    }
+  };
+
+  const enqueuePaths = async (paths: string[], detectedFolderRoots: string[] = []) => {
     const normalized = Array.from(
       new Set(paths.map((value) => value.trim()).filter((value) => value.length > 0)),
     );
@@ -271,6 +622,11 @@ function App() {
         payload: 'No valid file paths were provided. Choose files from the system dialog or drop files into the window.',
       });
       return;
+    }
+
+    const roots = Array.from(new Set([...detectedFolderRoots, ...normalized.filter(isLikelyFolderPath)]));
+    if (roots.length) {
+      setFolderRoots((previous) => Array.from(new Set([...previous, ...roots])));
     }
 
     dispatch({ type: 'CLEAR_QUEUE_ERROR' });
@@ -324,6 +680,140 @@ function App() {
         payload: `Unable to open file picker: ${error instanceof Error ? error.message : String(error)}`,
       });
     }
+  };
+
+  const onOpenFolderPicker = async () => {
+    if (!isTauriRuntime()) {
+      dispatch({
+        type: 'QUEUE_ERROR',
+        payload: 'Folder selection is available only in desktop builds.',
+      });
+      return;
+    }
+
+    try {
+      const selected = await invoke<string | null>('select_input_folder');
+      if (!selected) {
+        return;
+      }
+
+      await enqueuePaths([selected], [selected]);
+    } catch (error) {
+      dispatch({
+        type: 'QUEUE_ERROR',
+        payload: `Unable to open folder picker: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  };
+
+  const openItemCropModal = (item: ItemDescriptor) => {
+    setActiveCropItem(item);
+    const existing = itemAdjustments[item.id]?.crop;
+    setCropDraft(
+      existing ?? {
+        width: cropWidth,
+        height: cropHeight,
+        anchor: 'center',
+      },
+    );
+  };
+
+  const openItemResizeModal = (item: ItemDescriptor) => {
+    setActiveResizeItem(item);
+    const existing = itemAdjustments[item.id]?.resize;
+    setResizeDraft(
+      existing ?? {
+        width: resizeWidth,
+        height: resizeHeight,
+        lock: true,
+      },
+    );
+  };
+
+  const openFolderCropModal = (path: string) => {
+    setActiveFolderCropPath(path);
+    setFolderCropPreset(folderBatch[path]?.cropPreset ?? 'original');
+    setFolderCropAnchor(folderBatch[path]?.cropAnchor ?? 'center');
+  };
+
+  const openFolderResizeModal = (path: string) => {
+    setActiveFolderResizePath(path);
+    setFolderResizePreset(folderBatch[path]?.resizePreset ?? 'original');
+    setFolderResizeLock(folderBatch[path]?.lockAspect ?? true);
+  };
+
+  const applyItemCrop = () => {
+    if (!activeCropItem) return;
+
+    setItemAdjustments((previous) => ({
+      ...previous,
+      [activeCropItem.id]: {
+        ...previous[activeCropItem.id],
+        crop: cropDraft,
+      },
+    }));
+
+    setCropWidth(cropDraft.width);
+    setCropHeight(cropDraft.height);
+    setActiveCropItem(null);
+  };
+
+  const applyItemResize = () => {
+    if (!activeResizeItem) return;
+
+    setItemAdjustments((previous) => ({
+      ...previous,
+      [activeResizeItem.id]: {
+        ...previous[activeResizeItem.id],
+        resize: resizeDraft,
+      },
+    }));
+
+    setResizeWidth(resizeDraft.width);
+    setResizeHeight(resizeDraft.height);
+    setActiveResizeItem(null);
+  };
+
+  const applyFolderCrop = () => {
+    if (!activeFolderCropPath) return;
+
+    setFolderBatch((previous) => ({
+      ...previous,
+      [activeFolderCropPath]: {
+        ...previous[activeFolderCropPath],
+        cropPreset: folderCropPreset,
+        cropAnchor: folderCropAnchor,
+      },
+    }));
+
+    const preset = SIZE_PRESETS.find((item) => item.value === folderCropPreset);
+    if (preset) {
+      setCropWidth(preset.width ? String(preset.width) : '');
+      setCropHeight(preset.height ? String(preset.height) : '');
+    }
+
+    setActiveFolderCropPath(null);
+  };
+
+  const applyFolderResize = () => {
+    if (!activeFolderResizePath) return;
+
+    setFolderBatch((previous) => ({
+      ...previous,
+      [activeFolderResizePath]: {
+        ...previous[activeFolderResizePath],
+        resizePreset: folderResizePreset,
+        lockAspect: folderResizeLock,
+      },
+    }));
+
+    const preset = SIZE_PRESETS.find((item) => item.value === folderResizePreset);
+    if (preset) {
+      setResizeWidth(preset.width ? String(preset.width) : '');
+      setResizeHeight(preset.height ? String(preset.height) : '');
+    }
+
+    setActiveFolderResizePath(null);
   };
 
   const onCheckForUpdates = async () => {
@@ -455,126 +945,170 @@ function App() {
     }
   };
 
+  const showResultsState = visibleItems.length > 0 || folderRoots.length > 0;
+
   return (
     <div className="app-shell">
-      <main className="split-pane">
-        <section className="left-pane">
-          <header className="title-card">
-            <div>
-              <h1>PixelCrusher</h1>
-              <p>Fast image optimization queue for production assets</p>
-            </div>
-            <span className="version-badge">v{appVersion}</span>
-          </header>
+      <header className="app-topbar">
+        <div>
+          <h1>Pixel Crusher</h1>
+          <p>Drop files or folders and process with desktop-friendly presets.</p>
+        </div>
 
-          <div
-            className={`drop-zone ${dragActive ? 'active' : ''}`}
-            onDragEnter={() => setDragActive(true)}
-            onDragOver={(event) => {
-              event.preventDefault();
-              setDragActive(true);
-            }}
-            onDragLeave={() => setDragActive(false)}
-            onDrop={onDropFiles}
-          >
-            <div className="drop-zone-icon" aria-hidden="true">
-              ⤓
-            </div>
+        <div className="topbar-right">
+          <label className="profile-picker">
+            Compression profile
+            <select
+              aria-label="Compression profile"
+              value={profile}
+              onChange={(event) => setProfile(event.target.value as CompressionProfileId)}
+            >
+              {PROFILE_PRESETS.map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span className="version-chip">v{appVersion}</span>
+        </div>
+      </header>
+
+      <main className="workspace" onDrop={onDropFiles} onDragOver={(event) => event.preventDefault()}>
+        {!showResultsState ? (
+          <section className={`empty-drop-state ${dragActive ? 'active' : ''}`}>
             <h2>Drop files to crush</h2>
-            <p className="drop-helper">Drag images here or pick files · jpg/jpeg · png · svg · gif</p>
-            <button className="primary-btn" onClick={() => void onOpenSystemPicker()}>
-              Choose files
-            </button>
+            <p>PNG · JPG · SVG · GIF</p>
+            <div className="empty-actions">
+              <button className="primary-btn" onClick={() => void onOpenSystemPicker()}>
+                Browse Files
+              </button>
+              <button className="ghost-btn" onClick={() => void onOpenFolderPicker()}>
+                Browse Folder
+              </button>
+            </div>
             <input ref={fileInputRef} type="file" multiple hidden onChange={onChooseFiles} />
-          </div>
-
-          <article className="card queue-card">
-            <div className="card-header">
-              <h3>Active Queue</h3>
-              <span className="card-subtext">{completedCount} completed this session</span>
-            </div>
-
-            {queueState.lastError ? <p className="queue-error">{queueState.lastError}</p> : null}
-
-            <div className="queue-main-row">
-              <p className="queue-status">{queueMessage}</p>
-              <span className="queue-percent">{currentJob ? `${currentJob.progress}%` : '0%'}</span>
-            </div>
-
-            <div className="progress-wrap" role="progressbar" aria-valuenow={currentJob?.progress ?? 0}>
-              <div className="progress-bar" style={{ width: `${currentJob?.progress ?? 0}%` }} />
-            </div>
-
-            {currentJob ? (
-              <p className="queue-file" title={currentJob.input_path}>
-                {basename(currentJob.input_path)}
-              </p>
-            ) : (
-              <p className="queue-empty">No active jobs</p>
-            )}
-
-            <div className="queue-actions">
-              <button
-                className="ghost-btn"
-                disabled
-                title="Cancellation controls are not available in this build"
-              >
-                Cancel queued
-              </button>
-              <button
-                className="ghost-btn danger"
-                disabled
-                title="Cancellation controls are not available in this build"
-              >
-                Cancel all
-              </button>
-            </div>
-          </article>
-
-          <article className="card recent-card">
-            <div className="card-header">
-              <h3>Recent Results</h3>
-              <button
-                className="ghost-btn"
-                disabled={!recentOutputFolder}
-                onClick={() => {
-                  if (recentOutputFolder) {
-                    invoke('reveal_in_finder', { path: recentOutputFolder });
-                  }
-                }}
-              >
-                Reveal Output Folder
-              </button>
-            </div>
-
-            {queueState.recent.length === 0 ? (
-              <p className="empty-state">No completed jobs yet</p>
-            ) : (
-              <div className="results-list">
-                {queueState.recent.map((item) => (
-                  <article key={item.id} className="result-row">
-                    <div className="result-main">
-                      <strong title={item.output_path}>{basename(item.output_path)}</strong>
-                      <p>
-                        {item.stages_run.join(' → ') || 'copy'} · {Math.round(item.duration_ms)} ms
-                      </p>
-                    </div>
-                    <div className="result-meta">
-                      <span>
-                        {formatBytes(item.input_size)} → {formatBytes(item.output_size)}
-                      </span>
-                      <span className={item.size_delta_percent <= 0 ? 'delta-good' : 'delta-bad'}>
-                        {item.size_delta_percent.toFixed(1)}%
-                      </span>
-                    </div>
-                  </article>
-                ))}
+          </section>
+        ) : (
+          <section className="results-layout">
+            <article className={`drop-inline ${dragActive ? 'active' : ''}`}>
+              <p>Add more files or folders to the queue</p>
+              <div>
+                <button className="ghost-btn" onClick={() => void onOpenSystemPicker()}>
+                  Browse Files
+                </button>
+                <button className="ghost-btn" onClick={() => void onOpenFolderPicker()}>
+                  Browse Folder
+                </button>
+                <input ref={fileInputRef} type="file" multiple hidden onChange={onChooseFiles} />
               </div>
-            )}
-          </article>
-        </section>
+            </article>
 
-        <aside className="right-pane">
+            <article className="panel queue-panel">
+              <div className="panel-header">
+                <h3>Queue</h3>
+                <span>
+                  {queueStateLabel} · {completedCount} done
+                </span>
+              </div>
+              <p className="queue-message">{queueMessage}</p>
+              <div className="progress-wrap" role="progressbar" aria-valuenow={currentJob?.progress ?? 0}>
+                <div className="progress-bar" style={{ width: `${currentJob?.progress ?? 0}%` }} />
+              </div>
+              {queueState.lastError ? <p className="queue-error">{queueState.lastError}</p> : null}
+            </article>
+
+            {folderRoots.length > 0 ? (
+              <article className="panel folder-panel">
+                <div className="panel-header">
+                  <h3>Folder workflow</h3>
+                  <span>{folderRoots.length} root(s)</span>
+                </div>
+                <ul className="folder-tree">
+                  {folderTree.map((node) => (
+                    <FolderTreeView
+                      key={node.path}
+                      node={node}
+                      depth={0}
+                      onOpenFolderCrop={openFolderCropModal}
+                      onOpenFolderResize={openFolderResizeModal}
+                      folderBatch={folderBatch}
+                    />
+                  ))}
+                </ul>
+              </article>
+            ) : null}
+
+            <article className="panel results-panel">
+              <div className="panel-header">
+                <h3>Processed items</h3>
+                <button
+                  className="ghost-btn"
+                  disabled={!recentOutputFolder}
+                  onClick={() => {
+                    if (recentOutputFolder) {
+                      invoke('reveal_in_finder', { path: recentOutputFolder });
+                    }
+                  }}
+                >
+                  Reveal Output Folder
+                </button>
+              </div>
+
+              <div className="results-grid">
+                {visibleItems.map((item) => {
+                  const adjustments = itemAdjustments[item.id];
+
+                  return (
+                    <article key={item.id} className="result-card">
+                      <div className="thumb" aria-hidden="true">
+                        {basename(item.inputPath).slice(0, 1).toUpperCase()}
+                      </div>
+
+                      <div className="result-main">
+                        <strong>{basename(item.inputPath)}</strong>
+                        <p>
+                          {toHumanStatus(item.status)}
+                          {item.inputSize != null && item.outputSize != null
+                            ? ` · ${formatBytes(item.inputSize)} → ${formatBytes(item.outputSize)}`
+                            : ` · ${item.progress}%`}
+                        </p>
+                        {(adjustments?.crop || adjustments?.resize) && (
+                          <p className="adjustment-summary">
+                            {adjustments.crop ? `Crop ${adjustments.crop.width || 'auto'}×${adjustments.crop.height || 'auto'}` : ''}
+                            {adjustments.crop && adjustments.resize ? ' · ' : ''}
+                            {adjustments.resize
+                              ? `Resize ${adjustments.resize.width || 'auto'}×${adjustments.resize.height || 'auto'}`
+                              : ''}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className={`delta-pill ${(item.sizeDeltaPercent ?? 0) <= 0 ? 'good' : 'bad'}`}>
+                        {formatDelta(item.sizeDeltaPercent)}
+                      </div>
+
+                      <div className="row-actions">
+                        <button className="ghost-btn" onClick={() => openItemCropModal(item)}>
+                          Crop
+                        </button>
+                        <button className="ghost-btn" onClick={() => openItemResizeModal(item)}>
+                          Resize
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </article>
+          </section>
+        )}
+      </main>
+
+      <aside className="advanced-rail">
+        <details open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}>
+          <summary>Advanced controls</summary>
+
           <UpdateRail
             appVersion={appVersion}
             updateState={updateState}
@@ -590,7 +1124,10 @@ function App() {
               <input
                 type="checkbox"
                 checked={trimTransparent}
-                onChange={(event) => setTrimTransparent(event.target.checked)}
+                onChange={(event) => {
+                  setTrimTransparent(event.target.checked);
+                  setCustomProfile();
+                }}
               />
               <span>Trim transparent bounds (PNG)</span>
             </label>
@@ -606,7 +1143,10 @@ function App() {
                   inputMode="numeric"
                   value={cropWidth}
                   placeholder="Auto"
-                  onChange={(event) => setCropWidth(event.target.value)}
+                  onChange={(event) => {
+                    setCropWidth(event.target.value);
+                    setCustomProfile();
+                  }}
                 />
               </label>
               <label>
@@ -616,7 +1156,10 @@ function App() {
                   inputMode="numeric"
                   value={cropHeight}
                   placeholder="Auto"
-                  onChange={(event) => setCropHeight(event.target.value)}
+                  onChange={(event) => {
+                    setCropHeight(event.target.value);
+                    setCustomProfile();
+                  }}
                 />
               </label>
               <label>
@@ -626,7 +1169,10 @@ function App() {
                   inputMode="numeric"
                   value={resizeWidth}
                   placeholder="Original"
-                  onChange={(event) => setResizeWidth(event.target.value)}
+                  onChange={(event) => {
+                    setResizeWidth(event.target.value);
+                    setCustomProfile();
+                  }}
                 />
               </label>
               <label>
@@ -636,7 +1182,10 @@ function App() {
                   inputMode="numeric"
                   value={resizeHeight}
                   placeholder="Original"
-                  onChange={(event) => setResizeHeight(event.target.value)}
+                  onChange={(event) => {
+                    setResizeHeight(event.target.value);
+                    setCustomProfile();
+                  }}
                 />
               </label>
             </div>
@@ -649,7 +1198,10 @@ function App() {
                 <input
                   type="checkbox"
                   checked={runPngQuant}
-                  onChange={(event) => setRunPngQuant(event.target.checked)}
+                  onChange={(event) => {
+                    setRunPngQuant(event.target.checked);
+                    setCustomProfile();
+                  }}
                 />
                 <span>Run pngquant</span>
               </label>
@@ -657,7 +1209,10 @@ function App() {
                 <input
                   type="checkbox"
                   checked={runPngcrush}
-                  onChange={(event) => setRunPngcrush(event.target.checked)}
+                  onChange={(event) => {
+                    setRunPngcrush(event.target.checked);
+                    setCustomProfile();
+                  }}
                 />
                 <span>Run pngcrush</span>
               </label>
@@ -665,7 +1220,10 @@ function App() {
                 <input
                   type="checkbox"
                   checked={runZopfli}
-                  onChange={(event) => setRunZopfli(event.target.checked)}
+                  onChange={(event) => {
+                    setRunZopfli(event.target.checked);
+                    setCustomProfile();
+                  }}
                 />
                 <span>Run zopflipng</span>
               </label>
@@ -673,7 +1231,10 @@ function App() {
                 <input
                   type="checkbox"
                   checked={runPngout}
-                  onChange={(event) => setRunPngout(event.target.checked)}
+                  onChange={(event) => {
+                    setRunPngout(event.target.checked);
+                    setCustomProfile();
+                  }}
                 />
                 <span>Run pngout</span>
               </label>
@@ -687,7 +1248,10 @@ function App() {
                   value={pngQMin}
                   min={0}
                   max={100}
-                  onChange={(event) => setPngQMin(Number(event.target.value))}
+                  onChange={(event) => {
+                    setPngQMin(Number(event.target.value));
+                    setCustomProfile();
+                  }}
                 />
               </label>
               <label>
@@ -697,7 +1261,10 @@ function App() {
                   value={pngQMax}
                   min={0}
                   max={100}
-                  onChange={(event) => setPngQMax(Number(event.target.value))}
+                  onChange={(event) => {
+                    setPngQMax(Number(event.target.value));
+                    setCustomProfile();
+                  }}
                 />
               </label>
             </div>
@@ -725,12 +1292,15 @@ function App() {
                 min={20}
                 max={100}
                 value={quality}
-                onChange={(event) => setQuality(Number(event.target.value))}
+                onChange={(event) => {
+                  setQuality(Number(event.target.value));
+                  setCustomProfile();
+                }}
               />
             </label>
           </section>
-        </aside>
-      </main>
+        </details>
+      </aside>
 
       <footer className="status-bar">
         <div className="status-pill">Stack: {stackSource}</div>
@@ -742,6 +1312,185 @@ function App() {
           State: {statusReady.allReady ? 'ready' : 'degraded'}
         </div>
       </footer>
+
+      {activeCropItem ? (
+        <div className="modal-backdrop" role="dialog" aria-label="crop-modal">
+          <div className="modal-card">
+            <h3>Crop image</h3>
+            <p>{basename(activeCropItem.inputPath)}</p>
+            <div className="grid-2">
+              <label>
+                Width
+                <input
+                  type="number"
+                  value={cropDraft.width}
+                  onChange={(event) => setCropDraft((previous) => ({ ...previous, width: event.target.value }))}
+                />
+              </label>
+              <label>
+                Height
+                <input
+                  type="number"
+                  value={cropDraft.height}
+                  onChange={(event) => setCropDraft((previous) => ({ ...previous, height: event.target.value }))}
+                />
+              </label>
+            </div>
+            <label>
+              Anchor
+              <select
+                value={cropDraft.anchor}
+                onChange={(event) =>
+                  setCropDraft((previous) => ({
+                    ...previous,
+                    anchor: event.target.value as CropSettings['anchor'],
+                  }))
+                }
+              >
+                {CROP_ANCHORS.map((anchor) => (
+                  <option key={anchor.value} value={anchor.value}>
+                    {anchor.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="modal-actions">
+              <button className="ghost-btn" onClick={() => setActiveCropItem(null)}>
+                Cancel
+              </button>
+              <button className="primary-btn" onClick={applyItemCrop}>
+                Apply Crop
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {activeResizeItem ? (
+        <div className="modal-backdrop" role="dialog" aria-label="resize-modal">
+          <div className="modal-card">
+            <h3>Resize image</h3>
+            <p>{basename(activeResizeItem.inputPath)}</p>
+            <div className="grid-2">
+              <label>
+                Width
+                <input
+                  type="number"
+                  value={resizeDraft.width}
+                  onChange={(event) => setResizeDraft((previous) => ({ ...previous, width: event.target.value }))}
+                />
+              </label>
+              <label>
+                Height
+                <input
+                  type="number"
+                  value={resizeDraft.height}
+                  onChange={(event) => setResizeDraft((previous) => ({ ...previous, height: event.target.value }))}
+                />
+              </label>
+            </div>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={resizeDraft.lock}
+                onChange={(event) => setResizeDraft((previous) => ({ ...previous, lock: event.target.checked }))}
+              />
+              <span>Lock aspect ratio</span>
+            </label>
+            <div className="modal-actions">
+              <button className="ghost-btn" onClick={() => setActiveResizeItem(null)}>
+                Cancel
+              </button>
+              <button className="primary-btn" onClick={applyItemResize}>
+                Apply Resize
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {activeFolderCropPath ? (
+        <div className="modal-backdrop" role="dialog" aria-label="folder-crop-modal">
+          <div className="modal-card">
+            <h3>Folder crop settings</h3>
+            <p>{basename(activeFolderCropPath)}</p>
+            <label>
+              Size preset
+              <select
+                value={folderCropPreset}
+                onChange={(event) => setFolderCropPreset(event.target.value as (typeof SIZE_PRESETS)[number]['value'])}
+              >
+                {SIZE_PRESETS.map((preset) => (
+                  <option key={preset.value} value={preset.value}>
+                    {preset.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Anchor
+              <select
+                value={folderCropAnchor}
+                onChange={(event) => setFolderCropAnchor(event.target.value as CropSettings['anchor'])}
+              >
+                {CROP_ANCHORS.map((anchor) => (
+                  <option key={anchor.value} value={anchor.value}>
+                    {anchor.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="modal-actions">
+              <button className="ghost-btn" onClick={() => setActiveFolderCropPath(null)}>
+                Cancel
+              </button>
+              <button className="primary-btn" onClick={applyFolderCrop}>
+                Apply to Folder
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {activeFolderResizePath ? (
+        <div className="modal-backdrop" role="dialog" aria-label="folder-resize-modal">
+          <div className="modal-card">
+            <h3>Folder resize settings</h3>
+            <p>{basename(activeFolderResizePath)}</p>
+            <label>
+              Size preset
+              <select
+                value={folderResizePreset}
+                onChange={(event) =>
+                  setFolderResizePreset(event.target.value as (typeof SIZE_PRESETS)[number]['value'])
+                }
+              >
+                {SIZE_PRESETS.map((preset) => (
+                  <option key={preset.value} value={preset.value}>
+                    {preset.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={folderResizeLock}
+                onChange={(event) => setFolderResizeLock(event.target.checked)}
+              />
+              <span>Lock aspect ratio</span>
+            </label>
+            <div className="modal-actions">
+              <button className="ghost-btn" onClick={() => setActiveFolderResizePath(null)}>
+                Cancel
+              </button>
+              <button className="primary-btn" onClick={applyFolderResize}>
+                Apply to Folder
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

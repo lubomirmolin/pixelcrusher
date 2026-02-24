@@ -1,14 +1,13 @@
-import { describe, expect, it, vi } from 'vitest';
-import { renderToStaticMarkup } from 'react-dom/server';
+// @vitest-environment jsdom
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+
+const invokeMock = vi.fn();
 
 vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn((command: string) => {
-    if (command === 'app_version') {
-      return Promise.resolve('1.2.3');
-    }
-
-    return Promise.resolve([]);
-  }),
+  invoke: (...args: unknown[]) => invokeMock(...args),
 }));
 
 vi.mock('@tauri-apps/api/event', () => ({
@@ -24,25 +23,105 @@ vi.mock('@tauri-apps/api/webview', () => ({
 import App from './App';
 import { UpdateRail } from './components/UpdateRail';
 
-function expectOrdered(text: string, sequence: string[]) {
-  let index = -1;
-  for (const item of sequence) {
-    const next = text.indexOf(item);
-    expect(next).toBeGreaterThan(index);
-    index = next;
-  }
+const recentResult = {
+  id: 'job-1',
+  input_path: '/Users/demo/assets/hero/banner.png',
+  output_path: '/Users/demo/out/banner_pixelcrusher.png',
+  status: 'completed',
+  input_size: 1000,
+  output_size: 700,
+  size_delta_percent: -30,
+  stages_run: ['pngquant'],
+  duration_ms: 124,
+};
+
+function configureInvoke(overrides?: Partial<Record<string, unknown>>) {
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === 'startup_diagnostics') return [];
+    if (command === 'recent_results') return overrides?.recent_results ?? [];
+    if (command === 'app_version') return '1.2.3';
+    if (command === 'runtime_platform') return 'windows';
+    if (command === 'select_input_files') return [];
+    if (command === 'select_input_folder') return '/Users/demo/assets';
+    if (command === 'enqueue_paths') return [];
+    return [];
+  });
 }
 
-describe('App layout', () => {
-  it('renders split rail sections in expected order with update controls', () => {
-    const html = renderToStaticMarkup(<App />);
-
-    expectOrdered(html, ['Updates', 'General', 'Dimensions', 'Optimizers', 'JPEG quality']);
-    expect(html).toContain('Check for Updates');
+describe('App UI rewrite', () => {
+  afterEach(() => {
+    cleanup();
   });
 
-  it('renders actionable Windows install controls (not release-page-only fallback)', () => {
-    const html = renderToStaticMarkup(
+  beforeEach(() => {
+    vi.clearAllMocks();
+    configureInvoke();
+    (window as Window & { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+  });
+
+  it('renders empty state with top-bar profile selector', async () => {
+    render(<App />);
+
+    expect(await screen.findByText('Drop files to crush')).toBeTruthy();
+    expect(screen.getByRole('combobox', { name: 'Compression profile' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Browse Files' })).toBeTruthy();
+  });
+
+  it('renders processed/results state when history exists', async () => {
+    configureInvoke({ recent_results: [recentResult] });
+    render(<App />);
+
+    expect(await screen.findByText('Processed items')).toBeTruthy();
+    expect(screen.getByText('banner.png')).toBeTruthy();
+    expect(screen.getByText('-30.0%')).toBeTruthy();
+  });
+
+  it('opens crop and resize modals from item actions', async () => {
+    configureInvoke({ recent_results: [recentResult] });
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await screen.findByText('banner.png');
+
+    const card = screen.getByText('banner.png').closest('.result-card');
+    expect(card).toBeTruthy();
+    if (!(card instanceof HTMLElement)) {
+      throw new Error('missing card');
+    }
+
+    await user.click(within(card).getByRole('button', { name: 'Crop' }));
+    expect(await screen.findByText('Crop image')).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    await user.click(within(card).getByRole('button', { name: 'Resize' }));
+    expect(await screen.findByText('Resize image')).toBeTruthy();
+  });
+
+  it('renders folder tree mode and applies folder-level controls', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByText('Drop files to crush');
+    await user.click(screen.getByRole('button', { name: 'Browse Folder' }));
+
+    expect(await screen.findByText('Folder workflow')).toBeTruthy();
+    expect(screen.getByText('assets')).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Folder Resize' }));
+    expect(await screen.findByText('Folder resize settings')).toBeTruthy();
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Size preset' }), '1024');
+    await user.click(screen.getByRole('button', { name: 'Apply to Folder' }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Resize 1024×1024/)).toBeTruthy();
+    });
+  });
+
+  it('keeps actionable Windows install controls in update rail', () => {
+    render(
       <UpdateRail
         appVersion="1.1.0"
         updateState={{
@@ -64,19 +143,6 @@ describe('App layout', () => {
       />,
     );
 
-    expect(html).toContain('Install Update');
-    expect(html).not.toContain('Download Update');
-  });
-
-  it('renders drop zone, queue controls, and bottom status pills', () => {
-    const html = renderToStaticMarkup(<App />);
-
-    expect(html).toContain('Drop files to crush');
-    expect(html).toContain('Drag images here or pick files');
-    expect(html).toContain('Cancel queued');
-    expect(html).toContain('Cancel all');
-    expect(html).toContain('Reveal Output Folder');
-
-    expectOrdered(html, ['Stack:', 'Queue:', 'Bundled:', 'State:']);
+    expect(screen.getByRole('button', { name: 'Install Update' })).toBeTruthy();
   });
 });
