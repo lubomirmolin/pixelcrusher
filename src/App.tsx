@@ -9,13 +9,46 @@ import {
   queueReducer,
   type QueueEventPayload,
 } from './state/queueState';
+import {
+  formatToolSourceLabel,
+  summarizeBundledDiagnostics,
+  summarizeStackSource,
+  type ToolStatus,
+} from './state/toolDiagnostics';
 
-type ToolStatus = {
-  name: string;
-  available: boolean;
-  source?: string | null;
-  source_kind?: string | null;
-};
+const APP_VERSION = 'v0.1.0';
+const TERMINAL_JOB_STATUSES = new Set(['completed', 'failed']);
+
+function basename(filePath: string): string {
+  const parts = filePath.split(/[\\/]/).filter(Boolean);
+  return parts.at(-1) ?? filePath;
+}
+
+function dirname(filePath: string): string {
+  const normalized = filePath.replace(/\\/g, '/');
+  const index = normalized.lastIndexOf('/');
+  return index > 0 ? normalized.slice(0, index) : normalized;
+}
+
+function asOptionalDimension(value: string): number | null {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) {
+    return null;
+  }
+
+  return Math.floor(num);
+}
+
+function toHumanStatus(status: string): string {
+  if (!status) {
+    return 'Idle';
+  }
+
+  return status
+    .split('_')
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
 
 function App() {
   const [queueState, dispatch] = useReducer(queueReducer, initialQueueState);
@@ -30,8 +63,11 @@ function App() {
   const [quality, setQuality] = useState(82);
   const [pngQMin, setPngQMin] = useState(60);
   const [pngQMax, setPngQMax] = useState(90);
+  const [runPngQuant, setRunPngQuant] = useState(false);
+  const [runPngcrush, setRunPngcrush] = useState(true);
   const [runZopfli, setRunZopfli] = useState(false);
   const [runPngout, setRunPngout] = useState(false);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -52,43 +88,60 @@ function App() {
   const activeJobs = useMemo(
     () =>
       Object.values(queueState.jobs)
-        .filter((job) => !['completed', 'failed'].includes(job.status))
+        .filter((job) => !TERMINAL_JOB_STATUSES.has(job.status))
         .sort((a, b) => b.progress - a.progress),
     [queueState.jobs],
   );
 
-  const bundledDiagnosticsSummary = useMemo(() => {
-    const required = ['cjpeg', 'pngquant', 'pngcrush', 'svgo', 'gifsicle'];
-    const requiredStatuses = required.map((name) => diagnostics.find((tool) => tool.name === name));
-    const bundledReadyCount = requiredStatuses.filter(
-      (tool) => tool?.available && tool.source_kind === 'bundled',
-    ).length;
+  const completedCount = useMemo(
+    () => Object.values(queueState.jobs).filter((job) => job.status === 'completed').length,
+    [queueState.jobs],
+  );
 
-    return {
-      total: required.length,
-      ready: bundledReadyCount,
-      allReady: bundledReadyCount === required.length,
-    };
-  }, [diagnostics]);
+  const currentJob = activeJobs[0] ?? null;
+  const queueStateLabel = currentJob ? `${activeJobs.length} active` : 'idle';
+  const queueMessage = currentJob ? currentJob.message || toHumanStatus(currentJob.status) : 'Queue is idle';
+  const statusReady = useMemo(() => summarizeBundledDiagnostics(diagnostics), [diagnostics]);
+  const stackSource = useMemo(() => summarizeStackSource(diagnostics), [diagnostics]);
+
+  const recentOutputFolder = useMemo(() => {
+    const latest = queueState.recent[0];
+    return latest ? dirname(latest.output_path) : '';
+  }, [queueState.recent]);
 
   const optionsPayload = useMemo(
     () => ({
       trim_transparent: trimTransparent,
       dimensions: {
-        crop_width: cropWidth ? Number(cropWidth) : null,
-        crop_height: cropHeight ? Number(cropHeight) : null,
-        resize_width: resizeWidth ? Number(resizeWidth) : null,
-        resize_height: resizeHeight ? Number(resizeHeight) : null,
+        crop_width: asOptionalDimension(cropWidth),
+        crop_height: asOptionalDimension(cropHeight),
+        resize_width: asOptionalDimension(resizeWidth),
+        resize_height: asOptionalDimension(resizeHeight),
       },
       compression: {
         quality,
-        png_quant_quality_min: pngQMin,
-        png_quant_quality_max: pngQMax,
+        png_quant_quality_min: Math.min(pngQMin, pngQMax),
+        png_quant_quality_max: Math.max(pngQMin, pngQMax),
+        run_png_quant: runPngQuant,
+        run_pngcrush: runPngcrush,
         run_zopfli: runZopfli,
         run_pngout: runPngout,
       },
     }),
-    [cropHeight, cropWidth, pngQMax, pngQMin, quality, resizeHeight, resizeWidth, runPngout, runZopfli, trimTransparent],
+    [
+      cropHeight,
+      cropWidth,
+      pngQMax,
+      pngQMin,
+      quality,
+      resizeHeight,
+      resizeWidth,
+      runPngQuant,
+      runPngcrush,
+      runPngout,
+      runZopfli,
+      trimTransparent,
+    ],
   );
 
   const enqueuePaths = async (paths: string[]) => {
@@ -118,28 +171,16 @@ function App() {
 
   return (
     <div className="app-shell">
-      <header className="diagnostics-row">
-        <div className={`diag-pill ${bundledDiagnosticsSummary.allReady ? 'ok' : 'missing'}`}>
-          <span>bundled toolchain</span>
-          <small>
-            {bundledDiagnosticsSummary.ready}/{bundledDiagnosticsSummary.total} bundled-ready
-          </small>
-        </div>
-
-        {diagnostics.map((tool) => (
-          <div key={tool.name} className={`diag-pill ${tool.available ? 'ok' : 'missing'}`}>
-            <span>{tool.name}</span>
-            <small>
-              {tool.available
-                ? `${tool.source_kind ?? 'unknown'} · ${tool.source ?? 'PATH'}`
-                : 'missing'}
-            </small>
-          </div>
-        ))}
-      </header>
-
       <main className="split-pane">
         <section className="left-pane">
+          <header className="title-card">
+            <div>
+              <h1>PixelCrusher</h1>
+              <p>Fast image optimization queue for production assets</p>
+            </div>
+            <span className="version-badge">{APP_VERSION}</span>
+          </header>
+
           <div
             className={`drop-zone ${dragActive ? 'active' : ''}`}
             onDragEnter={() => setDragActive(true)}
@@ -150,107 +191,196 @@ function App() {
             onDragLeave={() => setDragActive(false)}
             onDrop={onDropFiles}
           >
+            <div className="drop-zone-icon" aria-hidden="true">
+              ⤓
+            </div>
             <h2>Drop files to crush</h2>
-            <p>Supports jpg/jpeg, png, svg, gif</p>
-            <button onClick={() => fileInputRef.current?.click()}>Choose files</button>
+            <p className="drop-helper">Drag images here or pick files · jpg/jpeg · png · svg · gif</p>
+            <button className="primary-btn" onClick={() => fileInputRef.current?.click()}>
+              Choose files
+            </button>
             <input ref={fileInputRef} type="file" multiple hidden onChange={onChooseFiles} />
           </div>
 
-          <div className="queue-card">
-            <h3>Active queue</h3>
-            {activeJobs.length === 0 ? (
-              <p className="muted">No active jobs</p>
-            ) : (
-              activeJobs.map((job) => (
-                <div key={job.id} className="job-row">
-                  <div className="job-top">
-                    <strong>{job.status}</strong>
-                    <span>{job.progress}%</span>
-                  </div>
-                  <div className="progress-wrap">
-                    <div className="progress-bar" style={{ width: `${job.progress}%` }} />
-                  </div>
-                  <small>{job.input_path}</small>
-                </div>
-              ))
-            )}
-          </div>
+          <article className="card queue-card">
+            <div className="card-header">
+              <h3>Active Queue</h3>
+              <span className="card-subtext">{completedCount} completed this session</span>
+            </div>
 
-          <div className="recent-card">
-            <h3>Recent results</h3>
-            {queueState.recent.length === 0 ? (
-              <p className="muted">No completed jobs yet</p>
+            <div className="queue-main-row">
+              <p className="queue-status">{queueMessage}</p>
+              <span className="queue-percent">{currentJob ? `${currentJob.progress}%` : '0%'}</span>
+            </div>
+
+            <div className="progress-wrap" role="progressbar" aria-valuenow={currentJob?.progress ?? 0}>
+              <div className="progress-bar" style={{ width: `${currentJob?.progress ?? 0}%` }} />
+            </div>
+
+            {currentJob ? (
+              <p className="queue-file" title={currentJob.input_path}>
+                {basename(currentJob.input_path)}
+              </p>
             ) : (
-              queueState.recent.map((item) => (
-                <article key={item.id} className="result-row">
-                  <div>
-                    <strong>{item.output_path.split('/').pop()}</strong>
-                    <p>{item.stages_run.join(' → ')}</p>
-                  </div>
-                  <div className="result-meta">
-                    <span>
-                      {formatBytes(item.input_size)} → {formatBytes(item.output_size)}
-                    </span>
-                    <span className={item.size_delta_percent <= 0 ? 'delta-good' : 'delta-bad'}>
-                      {item.size_delta_percent.toFixed(1)}%
-                    </span>
-                    <button onClick={() => invoke('reveal_in_finder', { path: item.output_path })}>Reveal</button>
-                  </div>
-                </article>
-              ))
+              <p className="queue-empty">No active jobs</p>
             )}
-          </div>
+
+            <div className="queue-actions">
+              <button
+                className="ghost-btn"
+                disabled
+                title="Cancellation controls are not available in this build"
+              >
+                Cancel queued
+              </button>
+              <button
+                className="ghost-btn danger"
+                disabled
+                title="Cancellation controls are not available in this build"
+              >
+                Cancel all
+              </button>
+            </div>
+          </article>
+
+          <article className="card recent-card">
+            <div className="card-header">
+              <h3>Recent Results</h3>
+              <button
+                className="ghost-btn"
+                disabled={!recentOutputFolder}
+                onClick={() => {
+                  if (recentOutputFolder) {
+                    invoke('reveal_in_finder', { path: recentOutputFolder });
+                  }
+                }}
+              >
+                Reveal Output Folder
+              </button>
+            </div>
+
+            {queueState.recent.length === 0 ? (
+              <p className="empty-state">No completed jobs yet</p>
+            ) : (
+              <div className="results-list">
+                {queueState.recent.map((item) => (
+                  <article key={item.id} className="result-row">
+                    <div className="result-main">
+                      <strong title={item.output_path}>{basename(item.output_path)}</strong>
+                      <p>
+                        {item.stages_run.join(' → ') || 'copy'} · {Math.round(item.duration_ms)} ms
+                      </p>
+                    </div>
+                    <div className="result-meta">
+                      <span>
+                        {formatBytes(item.input_size)} → {formatBytes(item.output_size)}
+                      </span>
+                      <span className={item.size_delta_percent <= 0 ? 'delta-good' : 'delta-bad'}>
+                        {item.size_delta_percent.toFixed(1)}%
+                      </span>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </article>
         </section>
 
         <aside className="right-pane">
-          <h3>Options</h3>
-
-          <div className="option-group">
-            <h4>General</h4>
-            <label>
+          <section className="rail-section">
+            <h3>General</h3>
+            <label className="checkbox-row">
               <input
                 type="checkbox"
                 checked={trimTransparent}
                 onChange={(event) => setTrimTransparent(event.target.checked)}
               />
-              Trim transparent bounds (PNG)
+              <span>Trim transparent bounds (PNG)</span>
             </label>
-          </div>
+          </section>
 
-          <div className="option-group">
-            <h4>Dimensions</h4>
+          <section className="rail-section">
+            <h3>Dimensions</h3>
             <div className="grid-2">
               <label>
                 Crop W
-                <input value={cropWidth} onChange={(event) => setCropWidth(event.target.value)} />
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  value={cropWidth}
+                  placeholder="Auto"
+                  onChange={(event) => setCropWidth(event.target.value)}
+                />
               </label>
               <label>
                 Crop H
-                <input value={cropHeight} onChange={(event) => setCropHeight(event.target.value)} />
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  value={cropHeight}
+                  placeholder="Auto"
+                  onChange={(event) => setCropHeight(event.target.value)}
+                />
               </label>
               <label>
                 Resize W
-                <input value={resizeWidth} onChange={(event) => setResizeWidth(event.target.value)} />
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  value={resizeWidth}
+                  placeholder="Original"
+                  onChange={(event) => setResizeWidth(event.target.value)}
+                />
               </label>
               <label>
                 Resize H
-                <input value={resizeHeight} onChange={(event) => setResizeHeight(event.target.value)} />
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  value={resizeHeight}
+                  placeholder="Original"
+                  onChange={(event) => setResizeHeight(event.target.value)}
+                />
               </label>
             </div>
-          </div>
+          </section>
 
-          <div className="option-group">
-            <h4>Compression</h4>
-            <label>
-              JPEG Quality {quality}
-              <input
-                type="range"
-                min={20}
-                max={100}
-                value={quality}
-                onChange={(event) => setQuality(Number(event.target.value))}
-              />
-            </label>
+          <section className="rail-section">
+            <h3>Optimizers</h3>
+            <div className="rail-fields">
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={runPngQuant}
+                  onChange={(event) => setRunPngQuant(event.target.checked)}
+                />
+                <span>Run pngquant</span>
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={runPngcrush}
+                  onChange={(event) => setRunPngcrush(event.target.checked)}
+                />
+                <span>Run pngcrush</span>
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={runZopfli}
+                  onChange={(event) => setRunZopfli(event.target.checked)}
+                />
+                <span>Run zopflipng</span>
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={runPngout}
+                  onChange={(event) => setRunPngout(event.target.checked)}
+                />
+                <span>Run pngout</span>
+              </label>
+            </div>
 
             <div className="grid-2">
               <label>
@@ -275,17 +405,46 @@ function App() {
               </label>
             </div>
 
+            <ul className="tool-status-list">
+              {diagnostics.map((tool) => {
+                const sourceLabel = formatToolSourceLabel(tool);
+
+                return (
+                  <li key={tool.name}>
+                    <span>{tool.name}</span>
+                    <span className={`source-chip ${sourceLabel}`}>{sourceLabel}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+
+          <section className="rail-section">
+            <h3>JPEG quality</h3>
             <label>
-              <input type="checkbox" checked={runZopfli} onChange={(event) => setRunZopfli(event.target.checked)} />
-              Run zopflipng (optional)
+              Quality {quality}
+              <input
+                type="range"
+                min={20}
+                max={100}
+                value={quality}
+                onChange={(event) => setQuality(Number(event.target.value))}
+              />
             </label>
-            <label>
-              <input type="checkbox" checked={runPngout} onChange={(event) => setRunPngout(event.target.checked)} />
-              Run pngout (optional)
-            </label>
-          </div>
+          </section>
         </aside>
       </main>
+
+      <footer className="status-bar">
+        <div className="status-pill">Stack: {stackSource}</div>
+        <div className="status-pill">Queue: {queueStateLabel}</div>
+        <div className="status-pill">
+          Bundled: {statusReady.ready}/{statusReady.total}
+        </div>
+        <div className={`status-pill ${statusReady.allReady ? 'ready' : 'warn'}`}>
+          State: {statusReady.allReady ? 'ready' : 'degraded'}
+        </div>
+      </footer>
     </div>
   );
 }
