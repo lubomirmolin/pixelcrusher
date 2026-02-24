@@ -181,6 +181,7 @@ final class AppViewModel: ObservableObject {
 
     @Published var isDropTargeted = false
     @Published private(set) var results: [ProcessingResult] = []
+    @Published private(set) var folderRoots: [URL] = []
 
     @Published private(set) var pendingCount = 0
     @Published private(set) var completedCount = 0
@@ -279,7 +280,7 @@ final class AppViewModel: ObservableObject {
                     return
                 }
 
-                guard let fileURL = Self.extractFileURL(from: item) else {
+                guard let droppedURL = Self.extractFileURL(from: item) else {
                     Task { @MainActor [weak self] in
                         self?.appendImmediateFailure(
                             inputURL: URL(fileURLWithPath: "unknown"),
@@ -289,24 +290,41 @@ final class AppViewModel: ObservableObject {
                     return
                 }
 
-                let allowed = ["png", "jpg", "jpeg", "svg", "gif"]
-                guard allowed.contains(fileURL.pathExtension.lowercased()) else {
-                    Task { @MainActor [weak self] in
-                        self?.appendImmediateFailure(
-                            inputURL: fileURL,
-                            message: "Skipped (supported: PNG/JPG/JPEG/SVG/GIF)"
-                        )
-                    }
-                    return
-                }
-
                 Task { @MainActor [weak self] in
-                    self?.enqueue(fileURL: fileURL)
+                    self?.enqueueInput(url: droppedURL)
                 }
             }
         }
 
         return true
+    }
+
+    func chooseFiles() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [
+            UTType.png,
+            UTType.jpeg,
+            UTType.gif,
+            UTType(filenameExtension: "svg")
+        ].compactMap { $0 }
+
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls {
+            enqueueInput(url: url)
+        }
+    }
+
+    func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+
+        guard panel.runModal() == .OK, let folder = panel.url else { return }
+        enqueueInput(url: folder)
     }
 
     func cancelQueuedJobs() {
@@ -348,7 +366,45 @@ final class AppViewModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([output])
     }
 
-    private func enqueue(fileURL: URL) {
+    private func enqueueInput(url: URL) {
+        var isDirectory = ObjCBool(false)
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+            appendImmediateFailure(inputURL: url, message: "Input path does not exist")
+            return
+        }
+
+        if isDirectory.boolValue {
+            if !folderRoots.contains(url) {
+                folderRoots.append(url)
+            }
+
+            let files = collectSupportedFiles(in: url)
+            if files.isEmpty {
+                appendImmediateFailure(
+                    inputURL: url,
+                    message: "No supported images found in folder (PNG/JPG/JPEG/SVG/GIF)"
+                )
+                return
+            }
+
+            for file in files {
+                enqueueFile(file)
+            }
+            return
+        }
+
+        guard Self.isSupportedFile(url) else {
+            appendImmediateFailure(
+                inputURL: url,
+                message: "Skipped (supported: PNG/JPG/JPEG/SVG/GIF)"
+            )
+            return
+        }
+
+        enqueueFile(url)
+    }
+
+    private func enqueueFile(_ fileURL: URL) {
         let queuedItem = queueStateMachine.enqueue(inputURL: fileURL)
         let result = ProcessingResult(
             id: queuedItem.id,
@@ -544,6 +600,28 @@ final class AppViewModel: ObservableObject {
         )
     }
 
+    private func collectSupportedFiles(in folderURL: URL) -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: folderURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        var files: [URL] = []
+        for case let fileURL as URL in enumerator {
+            guard Self.isSupportedFile(fileURL) else { continue }
+            files.append(fileURL)
+        }
+
+        return files.sorted { $0.path < $1.path }
+    }
+
+    nonisolated private static func isSupportedFile(_ url: URL) -> Bool {
+        ["png", "jpg", "jpeg", "svg", "gif"].contains(url.pathExtension.lowercased())
+    }
+
     nonisolated private static func extractFileURL(from item: NSSecureCoding?) -> URL? {
         if let data = item as? Data,
            let string = String(data: data, encoding: .utf8),
@@ -571,44 +649,57 @@ final class AppViewModel: ObservableObject {
 struct ContentView: View {
     @StateObject private var model = AppViewModel()
 
-    private var layoutDescriptor: PixelCrusherLayoutDescriptor {
-        PixelCrusherLayoutDescriptor(
-            context: PixelCrusherLayoutContext(
-                showHeader: true,
-                showDropZone: true,
-                showActiveQueue: true,
-                showRecentResults: true,
-                canRevealOutputFolder: model.results.contains(where: { $0.outputURL != nil })
-            )
-        )
-    }
+    @State private var profile: CompressionProfile = .balanced
+    @State private var showAdvanced = false
+
+    @State private var cropTarget: ProcessingResult?
+    @State private var resizeTarget: ProcessingResult?
+    @State private var folderCropTarget: URL?
+    @State private var folderResizeTarget: URL?
+
+    @State private var cropDraftWidth = ""
+    @State private var cropDraftHeight = ""
+    @State private var cropDraftAnchor: CropAnchor = .center
+
+    @State private var resizeDraftWidth = ""
+    @State private var resizeDraftHeight = ""
+    @State private var resizeDraftLock = true
+
+    @State private var folderCropPreset = "1024"
+    @State private var folderCropAnchor: CropAnchor = .center
+    @State private var folderResizePreset = "1024"
+    @State private var folderResizeLock = true
+
+    @State private var folderBatchSummary: [String: String] = [:]
+    @State private var itemSummary: [UUID: String] = [:]
+
+    private let sizePresets: [(id: String, label: String, width: String, height: String)] = [
+        ("original", "Original size", "", ""),
+        ("512", "512 × 512", "512", "512"),
+        ("1024", "1024 × 1024", "1024", "1024"),
+        ("2048", "2048 × 2048", "2048", "2048")
+    ]
 
     private var queuePercentText: String {
         guard model.totalCount > 0 else { return "0%" }
         return "\(Int((model.overallProgress * 100).rounded()))%"
     }
 
-    private var readinessText: String {
-        if model.isQueueRunning {
-            return "Processing \(model.completedCount)/\(model.totalCount)"
-        }
-
-        if model.totalCount == 0 {
-            return "Ready for new files"
-        }
-
-        return "Idle · \(model.completedCount) completed"
+    private var isEmptyState: Bool {
+        model.results.isEmpty
     }
 
     var body: some View {
         VStack(spacing: 0) {
+            topBar
+
             HStack(spacing: 0) {
-                leftPane
+                mainPane
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 Divider()
 
-                rightPane
+                sidebarPane
                     .frame(width: 360)
                     .frame(maxHeight: .infinity)
             }
@@ -619,85 +710,144 @@ struct ContentView: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .preferredColorScheme(.dark)
-        .frame(minWidth: 1100, minHeight: 700)
-    }
-
-    private var leftPane: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                if sectionVisible(.header) {
-                    headerBlock
-                }
-
-                if sectionVisible(.dropZone) {
-                    dropZone
-                }
-
-                if sectionVisible(.activeQueue) {
-                    queuePanel
-                }
-
-                if sectionVisible(.recentResults) {
-                    resultsPanel
-                }
-            }
-            .padding(18)
+        .frame(minWidth: 1080, minHeight: 700)
+        .sheet(item: $cropTarget) { result in
+            cropSheet(for: result)
+        }
+        .sheet(item: $resizeTarget) { result in
+            resizeSheet(for: result)
+        }
+        .sheet(item: Binding<FolderSheetTarget?>(
+            get: { folderCropTarget.map(FolderSheetTarget.init(url:)) },
+            set: { folderCropTarget = $0?.url }
+        )) { target in
+            folderCropSheet(for: target.url)
+        }
+        .sheet(item: Binding<FolderSheetTarget?>(
+            get: { folderResizeTarget.map(FolderSheetTarget.init(url:)) },
+            set: { folderResizeTarget = $0?.url }
+        )) { target in
+            folderResizeSheet(for: target.url)
         }
     }
 
-    private var rightPane: some View {
+    private var topBar: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Pixel Crusher")
+                    .font(.title3.weight(.semibold))
+                Text("Clean batch workflow for files and folders")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Picker("Profile", selection: $profile) {
+                ForEach(CompressionProfile.allCases, id: \.self) { value in
+                    Text(value.label).tag(value)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(width: 170)
+            .onChange(of: profile) { next in
+                applyProfile(next)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    private var mainPane: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Options")
-                    .font(.headline)
-                    .foregroundStyle(.secondary)
-
-                if optionsGroupVisible(.general) {
-                    generalOptionsGroup
+                if isEmptyState {
+                    emptyDropZone
+                } else {
+                    compactDropZone
+                    queuePanel
+                    folderPanel
+                    resultsPanel
                 }
-
-                if optionsGroupVisible(.dimensions) {
-                    dimensionsOptionsGroup
-                }
-
-                if optionsGroupVisible(.optimizers) {
-                    optimizerOptionsGroup
-                }
-
-                UpdateOptionsCard()
             }
             .padding(16)
+        }
+    }
+
+    private var sidebarPane: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                DisclosureGroup("Advanced controls", isExpanded: $showAdvanced) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        generalOptionsGroup
+                        dimensionsOptionsGroup
+                        optimizerOptionsGroup
+                        UpdateOptionsCard()
+                    }
+                    .padding(.top, 8)
+                }
+                .font(.subheadline.weight(.medium))
+            }
+            .padding(14)
         }
         .background(Color(nsColor: .underPageBackgroundColor).opacity(0.35))
     }
 
-    private var headerBlock: some View {
+    private var emptyDropZone: some View {
         PaneCard {
-            VStack(spacing: 10) {
+            VStack(spacing: 12) {
+                Spacer(minLength: 24)
+                Image(systemName: "arrow.down.doc")
+                    .font(.system(size: 30))
+                    .foregroundStyle(model.isDropTargeted ? Color.accentColor : Color.secondary)
+
+                Text("Drop files to crush")
+                    .font(.title3.weight(.semibold))
+
+                Text("PNG · JPG · SVG · GIF")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 HStack(spacing: 8) {
-                    Spacer()
+                    Button("Browse Files") {
+                        model.chooseFiles()
+                    }
+                    .buttonStyle(.borderedProminent)
 
-                    Text("PixelCrusher")
-                        .font(.title2.weight(.semibold))
-
-                    Text("v1")
-                        .font(.caption2.weight(.semibold))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(Capsule().fill(Color.accentColor.opacity(0.18)))
-                        .overlay(
-                            Capsule().strokeBorder(Color.accentColor.opacity(0.45), lineWidth: 0.8)
-                        )
-
-                    Spacer()
+                    Button("Browse Folder") {
+                        model.chooseFolder()
+                    }
+                    .buttonStyle(.bordered)
                 }
 
-                Text("Drop PNG/JPG/SVG/GIF files to trim, crop, and optimize using ImageOptim-style external tools.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: .infinity)
+                Spacer(minLength: 24)
             }
+            .frame(maxWidth: .infinity, minHeight: 320)
+        }
+        .onDrop(of: [UTType.fileURL.identifier], isTargeted: $model.isDropTargeted) { providers in
+            model.handleDrop(providers: providers)
+        }
+    }
+
+    private var compactDropZone: some View {
+        PaneCard {
+            HStack {
+                Text("Add more files or folders")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Browse Files") {
+                    model.chooseFiles()
+                }
+                .buttonStyle(.bordered)
+                Button("Browse Folder") {
+                    model.chooseFolder()
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .onDrop(of: [UTType.fileURL.identifier], isTargeted: $model.isDropTargeted) { providers in
+            model.handleDrop(providers: providers)
         }
     }
 
@@ -705,52 +855,94 @@ struct ContentView: View {
         PaneCard {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Active Queue")
-                            .font(.headline)
-                        Text("Completed \(model.completedCount)/\(model.totalCount)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
+                    Text("Queue")
+                        .font(.headline)
                     Spacer()
-
-                    if model.isQueueRunning {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
+                    Text("\(model.completedCount) / \(model.totalCount) done")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 ProgressView(value: model.overallProgress)
                     .progressViewStyle(.linear)
-                    .opacity(model.totalCount > 0 ? 1 : 0.45)
 
-                HStack(alignment: .firstTextBaseline) {
-                    Label(model.activeItemName ?? "Waiting for files", systemImage: model.isQueueRunning ? "gearshape.2.fill" : "clock")
+                HStack {
+                    Text(model.activeItemName ?? "Queue idle")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-
                     Spacer()
-
                     Text(queuePercentText)
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
+            }
+        }
+    }
 
-                HStack(spacing: 8) {
-                    Button("Cancel queued") {
-                        model.cancelQueuedJobs()
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(model.pendingCount == 0)
+    private var folderPanel: some View {
+        PaneCard {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Folder workflow")
+                        .font(.headline)
+                    Spacer()
+                    Text("\(model.folderRoots.count) roots")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
 
-                    Button("Cancel all") {
-                        model.cancelAllJobs()
+                if model.folderRoots.isEmpty {
+                    Text("Drop or browse a folder to enable nested batch controls.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.folderRoots, id: \.path) { root in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text(root.lastPathComponent)
+                                    .font(.subheadline.weight(.semibold))
+                                Spacer()
+                                Button("Folder Crop") {
+                                    folderCropTarget = root
+                                    folderCropPreset = "1024"
+                                    folderCropAnchor = model.cropAnchor
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                Button("Folder Resize") {
+                                    folderResizeTarget = root
+                                    folderResizePreset = "1024"
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+
+                            if let summary = folderBatchSummary[root.path] {
+                                Text(summary)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            let entries = nestedEntries(for: root)
+                            if entries.isEmpty {
+                                Text("No queued/processed files from this folder yet")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                ForEach(entries, id: \.self) { entry in
+                                    Text("• \(entry)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .padding(8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.38))
+                        )
                     }
-                    .buttonStyle(.bordered)
-                    .tint(.red)
-                    .disabled(!model.isQueueRunning && model.pendingCount == 0)
                 }
             }
         }
@@ -758,108 +950,244 @@ struct ContentView: View {
 
     private var resultsPanel: some View {
         PaneCard {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("Recent Results")
+                    Text("Processed items")
                         .font(.headline)
-
                     Spacer()
-
                     Button("Reveal Output Folder") {
                         model.openLatestOutputFolder()
                     }
                     .buttonStyle(.bordered)
-                    .disabled(!layoutDescriptor.showsRevealOutputFolderAction)
+                    .disabled(!model.results.contains(where: { $0.outputURL != nil }))
                 }
 
-                if model.results.isEmpty {
-                    Text("Processed files will appear here with output location and size delta badges.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 6)
-                } else {
-                    VStack(spacing: 8) {
-                        ForEach(Array(model.results.reversed())) { result in
-                            resultRow(for: result)
+                ForEach(Array(model.results.reversed())) { result in
+                    HStack(alignment: .center, spacing: 10) {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.accentColor.opacity(0.22))
+                            .frame(width: 34, height: 34)
+                            .overlay(
+                                Text(String(result.inputURL.lastPathComponent.prefix(1)).uppercased())
+                                    .font(.caption.weight(.semibold))
+                            )
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(result.inputURL.lastPathComponent)
+                                .font(.subheadline.weight(.semibold))
+                                .lineLimit(1)
+
+                            Text(result.statusText)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+
+                            if let summary = itemSummary[result.id] {
+                                Text(summary)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
+
+                        Spacer()
+
+                        if let delta = sizeDeltaBadge(for: result) {
+                            Text(delta.text)
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(delta.color.opacity(0.18), in: Capsule())
+                                .foregroundStyle(delta.color)
+                        }
+
+                        Button("Crop") {
+                            cropTarget = result
+                            cropDraftWidth = model.fixedCropWidth
+                            cropDraftHeight = model.fixedCropHeight
+                            cropDraftAnchor = model.cropAnchor
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+
+                        Button("Resize") {
+                            resizeTarget = result
+                            resizeDraftWidth = ""
+                            resizeDraftHeight = ""
+                            resizeDraftLock = true
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                    .padding(8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color(nsColor: .controlBackgroundColor).opacity(0.36))
+                    )
+                }
+            }
+        }
+    }
+
+    private var generalOptionsGroup: some View {
+        PaneCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("General")
+                    .font(.headline)
+                Toggle("Auto-trim empty space", isOn: $model.autoTrimTransparentBorders)
+                Toggle("Overwrite original files", isOn: $model.overwriteOriginal)
+            }
+        }
+    }
+
+    private var dimensionsOptionsGroup: some View {
+        PaneCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Dimensions")
+                    .font(.headline)
+
+                Toggle("Enable fixed crop", isOn: $model.fixedCropEnabled)
+
+                HStack {
+                    Text("Width")
+                    Spacer()
+                    TextField("1024", text: $model.fixedCropWidth)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+                        .multilineTextAlignment(.trailing)
+                        .disabled(!model.fixedCropEnabled)
+                }
+
+                HStack {
+                    Text("Height")
+                    Spacer()
+                    TextField("1024", text: $model.fixedCropHeight)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+                        .multilineTextAlignment(.trailing)
+                        .disabled(!model.fixedCropEnabled)
+                }
+
+                Picker("Anchor", selection: $model.cropAnchor) {
+                    Text("Center").tag(CropAnchor.center)
+                    Text("Top Left").tag(CropAnchor.topLeft)
+                    Text("Top Right").tag(CropAnchor.topRight)
+                    Text("Bottom Left").tag(CropAnchor.bottomLeft)
+                    Text("Bottom Right").tag(CropAnchor.bottomRight)
+                }
+                .pickerStyle(.menu)
+                .disabled(!model.fixedCropEnabled)
+            }
+        }
+    }
+
+    private var optimizerOptionsGroup: some View {
+        PaneCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Optimizers")
+                        .font(.headline)
+                    Spacer()
+                    Button("Refresh tools") {
+                        model.refreshToolAvailability()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+
+                HStack {
+                    Text("JPEG quality")
+                    Spacer()
+                    Text("\(Int(model.jpegQualityPercent.rounded()))%")
+                        .font(.system(.body, design: .monospaced))
+                }
+                Slider(value: $model.jpegQualityPercent, in: 1...100, step: 1)
+
+                Toggle("PNG lossy (pngquant)", isOn: $model.pngLossyEnabled)
+                Toggle("PNG crush", isOn: $model.pngUsePNGCrush)
+                Toggle("PNG zopfli", isOn: $model.pngUseZopfli)
+                Toggle("PNGOUT", isOn: $model.pngUsePNGOUT)
+
+                ForEach(model.toolStatuses, id: \.tool.rawValue) { status in
+                    HStack(spacing: 6) {
+                        Image(systemName: status.isAvailable ? "checkmark.circle.fill" : "xmark.circle")
+                            .foregroundStyle(status.isAvailable ? .green : .secondary)
+                            .font(.caption)
+                        Text(status.tool.displayName)
+                            .font(.caption)
+                        Spacer()
+                        Text(sourceLabel(for: status.source))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
         }
     }
 
-    private func resultRow(for result: ProcessingResult) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            stateIcon(for: result)
-                .frame(width: 18)
-                .padding(.top, 2)
+    private var footerStatusRow: some View {
+        HStack(spacing: 10) {
+            Label("Queue", systemImage: model.isQueueRunning ? "gearshape.2.fill" : "clock")
+                .font(.caption.weight(.medium))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color.white.opacity(0.1)))
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(result.inputURL.lastPathComponent)
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
+            Text(model.isQueueRunning ? "Processing \(model.completedCount)/\(model.totalCount)" : "Ready")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
-                    statusBadge(for: result)
+            Text(model.bundledDiagnosticsLine)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
 
-                    if let delta = sizeDeltaBadge(for: result) {
-                        Text(delta.text)
-                            .font(.caption2.weight(.semibold))
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 2)
-                            .background(delta.color.opacity(0.18), in: Capsule())
-                            .foregroundStyle(delta.color)
-                    }
-
-                    Spacer(minLength: 0)
-                }
-
-                Text(result.outputURL?.path ?? result.inputURL.path)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-
-                Text(result.statusText)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-
-                if let warning = result.warning {
-                    Text("⚠︎ \(warning)")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                }
-            }
-
-            Spacer(minLength: 8)
-
-            if result.canOpenFolder {
-                Button("Reveal") {
-                    model.openOutputFolder(for: result)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
+            Spacer()
         }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.45))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
-        )
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.bar)
     }
 
-    private func statusBadge(for result: ProcessingResult) -> some View {
-        Text(result.state.displayName)
-            .font(.caption2.weight(.semibold))
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2)
-            .background(stateColor(for: result).opacity(0.16), in: Capsule())
-            .foregroundStyle(stateColor(for: result))
+    private func applyProfile(_ profile: CompressionProfile) {
+        switch profile {
+        case .balanced:
+            model.jpegQualityPercent = 82
+            model.pngLossyEnabled = true
+            model.pngLossyQualityMin = 60
+            model.pngLossyQualityMax = 90
+            model.pngUsePNGCrush = true
+            model.pngUseZopfli = false
+        case .qualityFirst:
+            model.jpegQualityPercent = 92
+            model.pngLossyEnabled = false
+            model.pngLossyQualityMin = 75
+            model.pngLossyQualityMax = 98
+            model.pngUsePNGCrush = true
+            model.pngUseZopfli = true
+        case .smallest:
+            model.jpegQualityPercent = 70
+            model.pngLossyEnabled = true
+            model.pngLossyQualityMin = 45
+            model.pngLossyQualityMax = 75
+            model.pngUsePNGCrush = true
+            model.pngUseZopfli = true
+        }
+    }
+
+    private func nestedEntries(for root: URL) -> [String] {
+        let rootPath = root.path
+        return model.results
+            .map(\.inputURL.path)
+            .filter { $0.hasPrefix(rootPath) }
+            .map { path in
+                let relative = String(path.dropFirst(rootPath.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                return relative.isEmpty ? basename(path) : relative
+            }
+            .prefix(8)
+            .map { $0 }
+    }
+
+    private func basename(_ path: String) -> String {
+        URL(fileURLWithPath: path).lastPathComponent
     }
 
     private func sizeDeltaBadge(for result: ProcessingResult) -> (text: String, color: Color)? {
@@ -881,260 +1209,6 @@ struct ContentView: View {
         return (token, .secondary)
     }
 
-    private func sectionVisible(_ id: LeftPaneSectionID) -> Bool {
-        layoutDescriptor.section(id)?.isVisible ?? false
-    }
-
-    private func optionsGroupVisible(_ id: OptionsGroupID) -> Bool {
-        layoutDescriptor.optionsGroup(id)?.isVisible ?? false
-    }
-
-    private var generalOptionsGroup: some View {
-        PaneCard {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("General")
-                    .font(.headline)
-
-                Toggle("Auto-trim empty space (PNG/SVG)", isOn: $model.autoTrimTransparentBorders)
-                    .toggleStyle(.switch)
-
-                Toggle("Overwrite original files", isOn: $model.overwriteOriginal)
-                    .toggleStyle(.switch)
-            }
-        }
-    }
-
-    private var dimensionsOptionsGroup: some View {
-        PaneCard {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Dimensions")
-                    .font(.headline)
-
-                Toggle("Crop by explicit size", isOn: $model.fixedCropEnabled)
-                    .toggleStyle(.switch)
-
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Width")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        TextField("1024", text: $model.fixedCropWidth)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 98)
-                            .multilineTextAlignment(.trailing)
-                            .disabled(!model.fixedCropEnabled)
-                    }
-
-                    HStack {
-                        Text("Height")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        TextField("1024", text: $model.fixedCropHeight)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 98)
-                            .multilineTextAlignment(.trailing)
-                            .disabled(!model.fixedCropEnabled)
-                    }
-
-                    HStack {
-                        Text("Anchor")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Picker("Anchor", selection: $model.cropAnchor) {
-                            Text("Center").tag(CropAnchor.center)
-                            Text("Top Left").tag(CropAnchor.topLeft)
-                            Text("Top Right").tag(CropAnchor.topRight)
-                            Text("Bottom Left").tag(CropAnchor.bottomLeft)
-                            Text("Bottom Right").tag(CropAnchor.bottomRight)
-                        }
-                        .pickerStyle(.menu)
-                        .frame(width: 150)
-                        .disabled(!model.fixedCropEnabled)
-                    }
-                }
-            }
-        }
-    }
-
-    private var optimizerOptionsGroup: some View {
-        PaneCard {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Text("Optimizers")
-                        .font(.headline)
-                    Spacer()
-                    Button("Refresh tools") {
-                        model.refreshToolAvailability()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-
-                VStack(alignment: .leading, spacing: 5) {
-                    ForEach(model.toolStatuses, id: \.tool.rawValue) { status in
-                        HStack(spacing: 6) {
-                            Image(systemName: status.isAvailable ? "checkmark.circle.fill" : "xmark.circle")
-                                .foregroundStyle(status.isAvailable ? .green : .secondary)
-                                .font(.caption)
-                            Text(status.tool.displayName)
-                                .font(.caption)
-                            Spacer(minLength: 0)
-                            if let path = status.resolvedPath {
-                                Text("\(sourceLabel(for: status.source)): \((path as NSString).lastPathComponent)")
-                                    .font(.caption2.monospaced())
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                Text("missing")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("JPEG quality")
-                        Spacer()
-                        Text("\(Int(model.jpegQualityPercent.rounded()))%")
-                            .font(.system(.body, design: .monospaced))
-                    }
-                    Slider(value: $model.jpegQualityPercent, in: 1...100, step: 1)
-                }
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Toggle("PNG lossy (pngquant)", isOn: $model.pngLossyEnabled)
-                        .toggleStyle(.switch)
-
-                    HStack {
-                        Text("PNG quality min")
-                        Spacer()
-                        Text("\(Int(model.pngLossyQualityMin.rounded()))")
-                            .font(.system(.body, design: .monospaced))
-                    }
-                    Slider(value: $model.pngLossyQualityMin, in: 0...100, step: 1)
-                        .disabled(!model.pngLossyEnabled)
-
-                    HStack {
-                        Text("PNG quality max")
-                        Spacer()
-                        Text("\(Int(model.pngLossyQualityMax.rounded()))")
-                            .font(.system(.body, design: .monospaced))
-                    }
-                    Slider(value: $model.pngLossyQualityMax, in: 0...100, step: 1)
-                        .disabled(!model.pngLossyEnabled)
-
-                    HStack {
-                        Text("pngquant speed")
-                        Spacer()
-                        Text("\(Int(model.pngQuantSpeed.rounded()))")
-                            .font(.system(.body, design: .monospaced))
-                    }
-                    Slider(value: $model.pngQuantSpeed, in: 1...11, step: 1)
-                        .disabled(!model.pngLossyEnabled)
-
-                    Toggle("PNG lossless pass (pngcrush)", isOn: $model.pngUsePNGCrush)
-                        .toggleStyle(.switch)
-                    Toggle("PNG zopfli pass (zopflipng)", isOn: $model.pngUseZopfli)
-                        .toggleStyle(.switch)
-                    Toggle("PNGOUT pass (optional)", isOn: $model.pngUsePNGOUT)
-                        .toggleStyle(.switch)
-                }
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Toggle("SVG multipass (SVGO)", isOn: $model.svgMultipass)
-                        .toggleStyle(.switch)
-                }
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("GIF optimize level")
-                        Spacer()
-                        Text("\(Int(model.gifOptimizationLevel.rounded()))")
-                            .font(.system(.body, design: .monospaced))
-                    }
-                    Slider(value: $model.gifOptimizationLevel, in: 1...3, step: 1)
-
-                    HStack {
-                        Text("GIF lossy")
-                        Spacer()
-                        Text("\(Int(model.gifLossyLevel.rounded()))")
-                            .font(.system(.body, design: .monospaced))
-                    }
-                    Slider(value: $model.gifLossyLevel, in: 0...200, step: 1)
-                }
-            }
-        }
-    }
-
-    private var footerStatusRow: some View {
-        HStack(spacing: 10) {
-            Label("External CLI stack", systemImage: "terminal")
-                .font(.caption.weight(.medium))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(Capsule().fill(Color.white.opacity(0.1)))
-
-            Text(readinessText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Text(model.bundledDiagnosticsLine)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-
-            Spacer()
-
-            Text(model.isQueueRunning ? "Queue running" : "Ready")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.bar)
-    }
-
-    private func stateIcon(for result: ProcessingResult) -> some View {
-        Group {
-            switch result.state {
-            case .queued:
-                Image(systemName: "clock.badge")
-            case .preparing, .optimizing, .saving:
-                ProgressView()
-            case .done:
-                Image(systemName: "checkmark.circle.fill")
-            case .failed:
-                Image(systemName: "xmark.octagon.fill")
-            }
-        }
-        .foregroundStyle(stateColor(for: result))
-    }
-
-    private func stateColor(for result: ProcessingResult) -> Color {
-        switch result.state {
-        case .queued:
-            return .secondary
-        case .preparing, .optimizing, .saving:
-            return .accentColor
-        case .done:
-            return .green
-        case .failed:
-            return .red
-        }
-    }
-
     private func sourceLabel(for source: OptimizerToolResolutionSource?) -> String {
         switch source {
         case .bundled:
@@ -1148,37 +1222,189 @@ struct ContentView: View {
         }
     }
 
-    private var dropZone: some View {
-        PaneCard {
-            ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(style: StrokeStyle(lineWidth: 1.6, dash: [8]))
-                    .foregroundStyle(model.isDropTargeted ? Color.accentColor : Color.secondary.opacity(0.9))
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(model.isDropTargeted ? Color.accentColor.opacity(0.12) : Color.white.opacity(0.03))
-                    )
+    private func cropSheet(for result: ProcessingResult) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Crop image")
+                .font(.headline)
+            Text(result.inputURL.lastPathComponent)
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
-                VStack(spacing: 10) {
-                    Image(systemName: "arrow.down.doc.fill")
-                        .font(.system(size: 28))
-                        .foregroundStyle(model.isDropTargeted ? Color.accentColor : Color.primary)
-
-                    Text("Drop PNG/JPG/SVG/GIF files here")
-                        .font(.headline)
-
-                    Text("Files are queued and processed in order. Tool availability controls each optimization pipeline.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .padding(28)
+            HStack {
+                TextField("Width", text: $cropDraftWidth)
+                    .textFieldStyle(.roundedBorder)
+                TextField("Height", text: $cropDraftHeight)
+                    .textFieldStyle(.roundedBorder)
             }
-            .frame(height: 190)
+
+            Picker("Anchor", selection: $cropDraftAnchor) {
+                Text("Center").tag(CropAnchor.center)
+                Text("Top Left").tag(CropAnchor.topLeft)
+                Text("Top Right").tag(CropAnchor.topRight)
+                Text("Bottom Left").tag(CropAnchor.bottomLeft)
+                Text("Bottom Right").tag(CropAnchor.bottomRight)
+            }
+            .pickerStyle(.menu)
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    cropTarget = nil
+                }
+                Button("Apply Crop") {
+                    model.fixedCropEnabled = true
+                    model.fixedCropWidth = cropDraftWidth
+                    model.fixedCropHeight = cropDraftHeight
+                    model.cropAnchor = cropDraftAnchor
+                    itemSummary[result.id] = "Crop \(cropDraftWidth.isEmpty ? "auto" : cropDraftWidth)×\(cropDraftHeight.isEmpty ? "auto" : cropDraftHeight)"
+                    cropTarget = nil
+                }
+                .buttonStyle(.borderedProminent)
+            }
         }
-        .onDrop(of: [UTType.fileURL.identifier], isTargeted: $model.isDropTargeted) { providers in
-            model.handleDrop(providers: providers)
+        .padding(18)
+        .frame(width: 360)
+    }
+
+    private func resizeSheet(for result: ProcessingResult) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Resize image")
+                .font(.headline)
+            Text(result.inputURL.lastPathComponent)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                TextField("Width", text: $resizeDraftWidth)
+                    .textFieldStyle(.roundedBorder)
+                TextField("Height", text: $resizeDraftHeight)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            Toggle("Lock aspect ratio", isOn: $resizeDraftLock)
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    resizeTarget = nil
+                }
+                Button("Apply Resize") {
+                    itemSummary[result.id] = "Resize \(resizeDraftWidth.isEmpty ? "auto" : resizeDraftWidth)×\(resizeDraftHeight.isEmpty ? "auto" : resizeDraftHeight)"
+                    resizeTarget = nil
+                }
+                .buttonStyle(.borderedProminent)
+            }
         }
+        .padding(18)
+        .frame(width: 360)
+    }
+
+    private func folderCropSheet(for folder: URL) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Folder crop settings")
+                .font(.headline)
+            Text(folder.lastPathComponent)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Picker("Size", selection: $folderCropPreset) {
+                ForEach(sizePresets, id: \.id) { preset in
+                    Text(preset.label).tag(preset.id)
+                }
+            }
+            .pickerStyle(.menu)
+
+            Picker("Anchor", selection: $folderCropAnchor) {
+                Text("Center").tag(CropAnchor.center)
+                Text("Top Left").tag(CropAnchor.topLeft)
+                Text("Top Right").tag(CropAnchor.topRight)
+                Text("Bottom Left").tag(CropAnchor.bottomLeft)
+                Text("Bottom Right").tag(CropAnchor.bottomRight)
+            }
+            .pickerStyle(.menu)
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    folderCropTarget = nil
+                }
+                Button("Apply to Folder") {
+                    if let preset = sizePresets.first(where: { $0.id == folderCropPreset }) {
+                        model.fixedCropEnabled = preset.id != "original"
+                        model.fixedCropWidth = preset.width
+                        model.fixedCropHeight = preset.height
+                        model.cropAnchor = folderCropAnchor
+                        folderBatchSummary[folder.path] = "Crop \(preset.label) · Anchor \(folderCropAnchor.rawValue)"
+                    }
+                    folderCropTarget = nil
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(18)
+        .frame(width: 360)
+    }
+
+    private func folderResizeSheet(for folder: URL) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Folder resize settings")
+                .font(.headline)
+            Text(folder.lastPathComponent)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Picker("Size", selection: $folderResizePreset) {
+                ForEach(sizePresets, id: \.id) { preset in
+                    Text(preset.label).tag(preset.id)
+                }
+            }
+            .pickerStyle(.menu)
+
+            Toggle("Lock aspect ratio", isOn: $folderResizeLock)
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    folderResizeTarget = nil
+                }
+                Button("Apply to Folder") {
+                    if let preset = sizePresets.first(where: { $0.id == folderResizePreset }) {
+                        folderBatchSummary[folder.path] = "Resize \(preset.label) · Lock \(folderResizeLock ? "on" : "off")"
+                    }
+                    folderResizeTarget = nil
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(18)
+        .frame(width: 360)
+    }
+}
+
+private enum CompressionProfile: CaseIterable {
+    case balanced
+    case qualityFirst
+    case smallest
+
+    var label: String {
+        switch self {
+        case .balanced:
+            return "Balanced"
+        case .qualityFirst:
+            return "Quality First"
+        case .smallest:
+            return "Smallest Size"
+        }
+    }
+}
+
+private struct FolderSheetTarget: Identifiable {
+    let id: String
+    let url: URL
+
+    init(url: URL) {
+        self.url = url
+        self.id = url.path
     }
 }
 
