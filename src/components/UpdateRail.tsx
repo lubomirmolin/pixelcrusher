@@ -41,7 +41,7 @@ export function UpdateRail({
     <section className="rail-section">
       <div className="card-header compact-header">
         <h3>Updates</h3>
-        <button className="ghost-btn" disabled={checkingLocked} onClick={onCheckForUpdates}>
+        <button className="secondary-btn" disabled={checkingLocked} onClick={onCheckForUpdates}>
           {updateState.status === 'checking' ? 'Checking…' : 'Check for Updates'}
         </button>
       </div>
@@ -49,10 +49,10 @@ export function UpdateRail({
 
       {updateState.status === 'available' ? (
         <div className="update-actions">
-          <button className="ghost-btn" onClick={onDownloadUpdate}>
+          <button className="secondary-btn" onClick={onDownloadUpdate}>
             Download Update
           </button>
-          <button className="ghost-btn" onClick={() => onOpenReleasePage(updateState.releaseUrl)}>
+          <button className="secondary-btn" onClick={() => onOpenReleasePage(updateState.releaseUrl)}>
             Open Release Page
           </button>
         </div>
@@ -60,7 +60,7 @@ export function UpdateRail({
 
       {updateState.status === 'downloading' ? (
         <div className="update-actions">
-          <button className="ghost-btn" disabled>
+          <button className="secondary-btn" disabled>
             Downloading…
           </button>
         </div>
@@ -68,10 +68,10 @@ export function UpdateRail({
 
       {updateState.status === 'ready-to-install' ? (
         <div className="update-actions">
-          <button className="ghost-btn" onClick={onInstallUpdate}>
+          <button className="secondary-btn" onClick={onInstallUpdate}>
             {installButtonLabel(updateState)}
           </button>
-          <button className="ghost-btn" onClick={() => onOpenReleasePage(updateState.releaseUrl)}>
+          <button className="secondary-btn" onClick={() => onOpenReleasePage(updateState.releaseUrl)}>
             Open Release Page
           </button>
         </div>
@@ -85,7 +85,7 @@ export function UpdateRail({
 
       {(updateState.status === 'error' || updateState.status === 'action-required') && releaseUrl ? (
         <div className="update-actions">
-          <button className="ghost-btn" onClick={() => onOpenReleasePage(releaseUrl)}>
+          <button className="secondary-btn" onClick={() => onOpenReleasePage(releaseUrl)}>
             Open Release Page
           </button>
         </div>

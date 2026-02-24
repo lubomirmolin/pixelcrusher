@@ -2818,7 +2818,7 @@ dependencies = [
 
 [[package]]
 name = "pixelcrusher-app"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "log",
  "pixelcrusher-core",
