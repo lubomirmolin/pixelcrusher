@@ -142,8 +142,14 @@ final class AppViewModel: ObservableObject {
     private var queueStateMachine = ProcessingQueueStateMachine()
     private var resultIndexByID: [UUID: Int] = [:]
     private var queueWorkerTask: Task<Void, Never>?
-    private var currentJobTask: Task<ImageProcessingReport, Error>?
+    private var currentJobTasks: [UUID: Task<ImageProcessingReport, Error>] = [:]
     private var stopAfterCurrent = false
+
+    private enum JobCompletionOutcome: Sendable {
+        case success(ImageProcessingReport)
+        case cancelled
+        case failure(String)
+    }
 
     var overallProgress: Double {
         guard totalCount > 0 else { return 0 }
@@ -309,12 +315,13 @@ final class AppViewModel: ObservableObject {
     func cancelAllJobs() {
         stopAfterCurrent = true
         cancelQueuedJobs()
-        currentJobTask?.cancel()
-
-        if let activeID = queueStateMachine.progress.activeItemID,
-           let index = resultIndexByID[activeID],
-           !results[index].state.isTerminal {
-            results[index].statusText += " (cancel requested)"
+        for (id, task) in currentJobTasks {
+            if let index = resultIndexByID[id],
+               !results[index].state.isTerminal,
+               !results[index].statusText.contains("(cancel requested)") {
+                results[index].statusText += " (cancel requested)"
+            }
+            task.cancel()
         }
     }
 
@@ -413,16 +420,51 @@ final class AppViewModel: ObservableObject {
     private func runQueueWorker() async {
         defer {
             queueWorkerTask = nil
-            currentJobTask = nil
+            currentJobTasks.removeAll()
             stopAfterCurrent = false
             refreshQueueProgress()
         }
 
         while true {
-            guard let nextItem = queueStateMachine.dequeueNextQueued() else {
-                break
+            if !stopAfterCurrent {
+                scheduleQueuedJobsIfPossible()
             }
 
+            if currentJobTasks.isEmpty {
+                if queueStateMachine.progress.pendingCount == 0 {
+                    break
+                }
+                await Task.yield()
+                continue
+            }
+
+            guard let completion = await waitForNextCompletion() else {
+                continue
+            }
+
+            currentJobTasks[completion.id] = nil
+
+            switch completion.outcome {
+            case .success(let report):
+                completeJob(id: completion.id, report: report)
+            case .cancelled:
+                failJob(id: completion.id, message: "Cancelled")
+            case .failure(let message):
+                failJob(id: completion.id, message: message)
+            }
+
+            refreshQueueProgress()
+
+            if stopAfterCurrent && currentJobTasks.isEmpty {
+                stopAfterCurrent = false
+                break
+            }
+        }
+    }
+
+    private func scheduleQueuedJobsIfPossible() {
+        while currentJobTasks.count < preferredParallelism,
+              let nextItem = queueStateMachine.dequeueNextQueued() {
             apply(
                 update: ProcessingStatusUpdate(
                     state: .preparing,
@@ -445,29 +487,47 @@ final class AppViewModel: ObservableObject {
                 }
             }
 
-            let jobTask = Task.detached(priority: .userInitiated) {
+            currentJobTasks[nextItem.id] = Task.detached(priority: .userInitiated) {
                 try processor.processImage(at: inputURL, options: options, statusHandler: statusBridge)
             }
-            currentJobTask = jobTask
+        }
+    }
 
-            do {
-                let report = try await jobTask.value
-                currentJobTask = nil
-                completeJob(id: nextItem.id, report: report)
-            } catch is CancellationError {
-                currentJobTask = nil
-                failJob(id: nextItem.id, message: "Cancelled")
-            } catch {
-                currentJobTask = nil
-                failJob(id: nextItem.id, message: error.localizedDescription)
+    private var preferredParallelism: Int {
+        let options = currentOptions()
+
+        if options.optimizer.pngUseZopfli || options.optimizer.pngUsePNGOUT {
+            return 1
+        }
+
+        let cores = ProcessInfo.processInfo.activeProcessorCount
+        let cpuBound = max(1, min(4, cores))
+        let preferred = max(2, min(4, cores / 2))
+        return min(cpuBound, preferred)
+    }
+
+    private func waitForNextCompletion() async -> (id: UUID, outcome: JobCompletionOutcome)? {
+        guard !currentJobTasks.isEmpty else {
+            return nil
+        }
+
+        return await withTaskGroup(of: (UUID, JobCompletionOutcome).self) { group in
+            for (id, task) in currentJobTasks {
+                group.addTask {
+                    do {
+                        let report = try await task.value
+                        return (id, .success(report))
+                    } catch is CancellationError {
+                        return (id, .cancelled)
+                    } catch {
+                        return (id, .failure(error.localizedDescription))
+                    }
+                }
             }
 
-            refreshQueueProgress()
-
-            if stopAfterCurrent {
-                stopAfterCurrent = false
-                break
-            }
+            let completion = await group.next()
+            group.cancelAll()
+            return completion
         }
     }
 
