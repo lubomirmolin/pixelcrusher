@@ -1,197 +1,29 @@
-use std::collections::HashMap;
+mod command;
+mod resolver;
+
 use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::io::Write;
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-use std::sync::{OnceLock, RwLock};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 
 use crate::format::AssetFormat;
-use crate::types::{CompressionOptions, ToolStatus};
+use crate::model::{CompressionOptions, ToolAvailability};
 
-const REQUIRED_TOOLS: [&str; 5] = ["cjpeg", "pngquant", "pngcrush", "svgo", "gifsicle"];
-const OPTIONAL_TOOLS: [&str; 2] = ["zopflipng", "pngout"];
+use command::{pngcrush_args, run_command, swap_extension, write_ppm_from_image};
+use resolver::ToolResolver;
 
-static RUNTIME_BUNDLED_TOOLS_DIR: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
-
-pub fn set_runtime_bundled_tools_dir(path: Option<PathBuf>) {
-    let lock = RUNTIME_BUNDLED_TOOLS_DIR.get_or_init(|| RwLock::new(None));
-    if let Ok(mut guard) = lock.write() {
-        *guard = path;
-    }
-}
+pub use resolver::set_runtime_bundled_tools_dir;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PipelineKind {
+enum PipelineKind {
     Jpeg,
     Png,
     Svg,
     Gif,
-    None,
+    Passthrough,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolResolutionSource {
-    EnvironmentOverride,
-    Bundled,
-    HostPath,
-}
-
-impl ToolResolutionSource {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ToolResolutionSource::EnvironmentOverride => "environment_override",
-            ToolResolutionSource::Bundled => "bundled",
-            ToolResolutionSource::HostPath => "host_path",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ResolvedTool {
-    pub executable: PathBuf,
-    pub source: ToolResolutionSource,
-}
-
-#[derive(Debug, Clone)]
-pub struct ToolResolver {
-    environment: HashMap<String, String>,
-    search_paths: Vec<PathBuf>,
-    bundled_tools_dir: Option<PathBuf>,
-}
-
-impl ToolResolver {
-    pub fn new(
-        environment: HashMap<String, String>,
-        search_paths: Vec<PathBuf>,
-        bundled_tools_dir: Option<PathBuf>,
-    ) -> Self {
-        Self {
-            environment,
-            search_paths,
-            bundled_tools_dir,
-        }
-    }
-
-    pub fn from_process_environment() -> Self {
-        let environment: HashMap<String, String> = std::env::vars().collect();
-        let search_paths = environment
-            .get("PATH")
-            .map(|v| std::env::split_paths(v).collect::<Vec<_>>())
-            .unwrap_or_default();
-
-        let bundled_tools_dir = default_bundled_tools_dir(&environment);
-
-        Self {
-            environment,
-            search_paths,
-            bundled_tools_dir,
-        }
-    }
-
-    pub fn detect_statuses(&self) -> Vec<ToolStatus> {
-        REQUIRED_TOOLS
-            .iter()
-            .chain(OPTIONAL_TOOLS.iter())
-            .map(|name| {
-                let resolved = self.resolve_named(name);
-                ToolStatus {
-                    name: (*name).to_string(),
-                    available: resolved.is_some(),
-                    source: resolved
-                        .as_ref()
-                        .map(|r| r.executable.display().to_string()),
-                    source_kind: resolved.map(|r| r.source.as_str().to_string()),
-                }
-            })
-            .collect()
-    }
-
-    pub fn resolve_named(&self, tool_name: &str) -> Option<ResolvedTool> {
-        if let Some(override_path) = self.environment_override(tool_name)
-            && is_executable(&override_path)
-        {
-            return Some(ResolvedTool {
-                executable: override_path,
-                source: ToolResolutionSource::EnvironmentOverride,
-            });
-        }
-
-        if let Some(bundled) = self.find_bundled(tool_name) {
-            return Some(ResolvedTool {
-                executable: bundled,
-                source: ToolResolutionSource::Bundled,
-            });
-        }
-
-        if let Some(host) = self.find_on_host_path(tool_name) {
-            return Some(ResolvedTool {
-                executable: host,
-                source: ToolResolutionSource::HostPath,
-            });
-        }
-
-        None
-    }
-
-    fn environment_override(&self, tool_name: &str) -> Option<PathBuf> {
-        let key = format!(
-            "PIXELCRUSHER_{}_PATH",
-            tool_name.to_ascii_uppercase().replace('-', "_")
-        );
-
-        self.environment
-            .get(&key)
-            .filter(|v| !v.trim().is_empty())
-            .map(PathBuf::from)
-    }
-
-    fn find_bundled(&self, tool_name: &str) -> Option<PathBuf> {
-        let root = self.bundled_tools_dir.as_ref()?;
-        for candidate_name in candidate_executable_names(tool_name) {
-            let candidate = root.join("bin").join(candidate_name);
-            if is_executable(&candidate) {
-                return Some(candidate);
-            }
-        }
-
-        None
-    }
-
-    fn find_on_host_path(&self, tool_name: &str) -> Option<PathBuf> {
-        if let Ok(found) = which::which(tool_name) {
-            return Some(found);
-        }
-
-        for dir in &self.search_paths {
-            for candidate_name in candidate_executable_names(tool_name) {
-                let candidate = dir.join(candidate_name);
-                if is_executable(&candidate) {
-                    return Some(candidate);
-                }
-            }
-        }
-
-        None
-    }
-}
-
-pub fn pipeline_for_format(format: AssetFormat) -> PipelineKind {
-    match format {
-        AssetFormat::Jpeg => PipelineKind::Jpeg,
-        AssetFormat::Png => PipelineKind::Png,
-        AssetFormat::Svg => PipelineKind::Svg,
-        AssetFormat::Gif => PipelineKind::Gif,
-        AssetFormat::Unknown => PipelineKind::None,
-    }
-}
-
-pub fn diagnostics() -> Vec<ToolStatus> {
+pub fn diagnostics() -> Vec<ToolAvailability> {
     ToolResolver::from_process_environment().detect_statuses()
 }
 
@@ -201,7 +33,7 @@ pub fn optimize_asset(
     output_path: &Path,
     compression: &CompressionOptions,
 ) -> Result<Vec<String>> {
-    let mut stages = vec![];
+    let mut applied_stages = vec![];
     let resolver = ToolResolver::from_process_environment();
 
     if input_path != output_path {
@@ -233,9 +65,9 @@ pub fn optimize_asset(
 
                 let _ = fs::remove_file(&ppm_input);
                 run_result?;
-                stages.push("cjpeg".to_string());
+                applied_stages.push("cjpeg".to_string());
             } else {
-                stages.push("copy".to_string());
+                applied_stages.push("copy".to_string());
             }
         }
         PipelineKind::Png => {
@@ -261,7 +93,7 @@ pub fn optimize_asset(
                     ],
                 )?;
                 fs::rename(&tmp, output_path)?;
-                stages.push("pngquant".to_string());
+                applied_stages.push("pngquant".to_string());
             }
 
             if compression.run_pngcrush
@@ -272,7 +104,7 @@ pub fn optimize_asset(
                 let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
                 run_command(&pngcrush.executable, &arg_refs)?;
                 fs::rename(&tmp, output_path)?;
-                stages.push("pngcrush".to_string());
+                applied_stages.push("pngcrush".to_string());
             }
 
             if compression.run_zopfli
@@ -288,7 +120,7 @@ pub fn optimize_asset(
                     ],
                 )?;
                 fs::rename(&tmp, output_path)?;
-                stages.push("zopflipng".to_string());
+                applied_stages.push("zopflipng".to_string());
             }
 
             if compression.run_pngout
@@ -303,11 +135,11 @@ pub fn optimize_asset(
                     ],
                 )?;
                 fs::rename(&tmp, output_path)?;
-                stages.push("pngout".to_string());
+                applied_stages.push("pngout".to_string());
             }
 
-            if stages.is_empty() {
-                stages.push("copy".to_string());
+            if applied_stages.is_empty() {
+                applied_stages.push("copy".to_string());
             }
         }
         PipelineKind::Svg => {
@@ -318,11 +150,11 @@ pub fn optimize_asset(
                 }
                 args.push("-o".to_string());
                 args.push(output_path.to_string_lossy().to_string());
-                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
                 run_command(&svgo.executable, &arg_refs)?;
-                stages.push("svgo".to_string());
+                applied_stages.push("svgo".to_string());
             } else {
-                stages.push("copy".to_string());
+                applied_stages.push("copy".to_string());
             }
         }
         PipelineKind::Gif => {
@@ -337,169 +169,40 @@ pub fn optimize_asset(
                 args.push(input_path.to_string_lossy().to_string());
                 args.push("-o".to_string());
                 args.push(output_path.to_string_lossy().to_string());
-                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
                 run_command(&gifsicle.executable, &arg_refs)?;
-                stages.push("gifsicle".to_string());
+                applied_stages.push("gifsicle".to_string());
             } else {
-                stages.push("copy".to_string());
+                applied_stages.push("copy".to_string());
             }
         }
-        PipelineKind::None => stages.push("copy".to_string()),
+        PipelineKind::Passthrough => applied_stages.push("copy".to_string()),
     }
 
-    Ok(stages)
+    Ok(applied_stages)
 }
 
-fn pngcrush_args(input_path: &Path, output_path: &Path) -> Vec<String> {
-    vec![
-        "-brute".to_string(),
-        input_path.to_string_lossy().to_string(),
-        output_path.to_string_lossy().to_string(),
-    ]
-}
-
-fn run_command(binary: &Path, args: &[&str]) -> Result<()> {
-    let mut command = Command::new(binary);
-    command.args(args);
-
-    #[cfg(windows)]
-    {
-        // CREATE_NO_WINDOW to avoid flashing a terminal window for each CLI tool invocation.
-        command.creation_flags(0x08000000);
+fn pipeline_for_format(format: AssetFormat) -> PipelineKind {
+    match format {
+        AssetFormat::Jpeg => PipelineKind::Jpeg,
+        AssetFormat::Png => PipelineKind::Png,
+        AssetFormat::Svg => PipelineKind::Svg,
+        AssetFormat::Gif => PipelineKind::Gif,
+        AssetFormat::Unknown => PipelineKind::Passthrough,
     }
-
-    let output = command
-        .output()
-        .with_context(|| format!("failed to run {}", binary.display()))?;
-
-    if !output.status.success() {
-        anyhow::bail!(
-            "{} failed: {}",
-            binary.display(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    Ok(())
-}
-
-fn candidate_executable_names(tool_name: &str) -> Vec<String> {
-    #[cfg(windows)]
-    {
-        vec![
-            tool_name.to_string(),
-            format!("{tool_name}.exe"),
-            format!("{tool_name}.cmd"),
-            format!("{tool_name}.bat"),
-        ]
-    }
-
-    #[cfg(not(windows))]
-    {
-        vec![tool_name.to_string()]
-    }
-}
-
-fn runtime_bundled_tools_dir_override() -> Option<PathBuf> {
-    let lock = RUNTIME_BUNDLED_TOOLS_DIR.get_or_init(|| RwLock::new(None));
-    lock.read().ok().and_then(|guard| guard.clone())
-}
-
-fn default_bundled_tools_dir(environment: &HashMap<String, String>) -> Option<PathBuf> {
-    if let Some(override_dir) = environment.get("PIXELCRUSHER_BUNDLED_TOOLS_DIR")
-        && !override_dir.trim().is_empty()
-    {
-        let path = PathBuf::from(override_dir);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-
-    if let Some(override_path) = runtime_bundled_tools_dir_override()
-        && override_path.exists()
-    {
-        return Some(override_path);
-    }
-
-    if let Ok(current_exe) = std::env::current_exe() {
-        if let Some(parent) = current_exe.parent() {
-            let mut candidates = vec![
-                parent.join("../Resources/BundledTools"),
-                parent.join("resources/BundledTools"),
-            ];
-
-            if let Some(executable_stem) = current_exe.file_stem().and_then(|s| s.to_str()) {
-                candidates.push(
-                    parent
-                        .join("../lib")
-                        .join(executable_stem)
-                        .join("resources/BundledTools"),
-                );
-            }
-
-            for candidate in candidates {
-                if candidate.exists() {
-                    return Some(candidate);
-                }
-            }
-        }
-    }
-
-    None
-}
-
-fn is_executable(path: &Path) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
-        return false;
-    };
-
-    if !metadata.is_file() {
-        return false;
-    }
-
-    #[cfg(unix)]
-    {
-        let mode = metadata.permissions().mode();
-        mode & 0o111 != 0
-    }
-
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
-fn swap_extension(path: &Path, suffix: &str) -> PathBuf {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = path
-        .file_stem()
-        .map(|f| f.to_string_lossy().to_string())
-        .unwrap_or_else(|| "output".to_string());
-    parent.join(format!("{stem}.{suffix}"))
-}
-
-fn write_ppm_from_image(input_path: &Path, ppm_path: &Path) -> Result<()> {
-    let decoded = image::open(input_path)
-        .with_context(|| format!("failed to decode source for cjpeg {}", input_path.display()))?;
-    let rgb = decoded.to_rgb8();
-    let (width, height) = rgb.dimensions();
-
-    let mut output = fs::File::create(ppm_path)
-        .with_context(|| format!("failed to create temporary cjpeg input {}", ppm_path.display()))?;
-    write!(output, "P6\n{} {}\n255\n", width, height)
-        .with_context(|| format!("failed to write cjpeg ppm header {}", ppm_path.display()))?;
-    output
-        .write_all(rgb.as_raw())
-        .with_context(|| format!("failed to write cjpeg ppm payload {}", ppm_path.display()))?;
-
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ToolResolutionKind;
     use image::{ImageFormat, Rgb, RgbImage, Rgba, RgbaImage};
+    use std::collections::HashMap;
+    use std::path::Path;
     use std::sync::{Mutex, OnceLock};
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn pipeline_selection_is_correct() {
@@ -509,7 +212,7 @@ mod tests {
         assert_eq!(pipeline_for_format(AssetFormat::Gif), PipelineKind::Gif);
         assert_eq!(
             pipeline_for_format(AssetFormat::Unknown),
-            PipelineKind::None
+            PipelineKind::Passthrough
         );
     }
 
@@ -534,7 +237,7 @@ mod tests {
 
         let resolved = resolver.resolve_named("pngquant").unwrap();
         assert_eq!(resolved.executable, bundled_tool);
-        assert_eq!(resolved.source, ToolResolutionSource::Bundled);
+        assert_eq!(resolved.source, ToolResolutionKind::Bundled);
     }
 
     #[test]
@@ -551,7 +254,7 @@ mod tests {
 
         let resolved = resolver.resolve_named(tool_name).unwrap();
         assert_eq!(resolved.executable, host_tool);
-        assert_eq!(resolved.source, ToolResolutionSource::HostPath);
+        assert_eq!(resolved.source, ToolResolutionKind::HostPath);
     }
 
     #[cfg(windows)]
@@ -568,7 +271,7 @@ mod tests {
 
         let resolved = resolver.resolve_named("pngquant").unwrap();
         assert_eq!(resolved.executable, bundled_tool);
-        assert_eq!(resolved.source, ToolResolutionSource::Bundled);
+        assert_eq!(resolved.source, ToolResolutionKind::Bundled);
     }
 
     #[test]
@@ -597,7 +300,7 @@ mod tests {
 
         let resolved = resolver.resolve_named("gifsicle").unwrap();
         assert_eq!(resolved.executable, override_tool);
-        assert_eq!(resolved.source, ToolResolutionSource::EnvironmentOverride);
+        assert_eq!(resolved.source, ToolResolutionKind::EnvironmentOverride);
     }
 
     #[test]
@@ -753,7 +456,8 @@ cp \"$input\" \"$out\"
         }
 
         let compression = CompressionOptions::default();
-        let stages = optimize_asset(AssetFormat::Jpeg, &input_jpeg, &output_jpeg, &compression).unwrap();
+        let stages =
+            optimize_asset(AssetFormat::Jpeg, &input_jpeg, &output_jpeg, &compression).unwrap();
 
         match previous {
             Some(value) => unsafe {
