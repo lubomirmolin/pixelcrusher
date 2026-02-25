@@ -14,12 +14,14 @@ struct ResultThumbnail: View {
 
     var body: some View {
         ZStack {
+            Color.secondary.opacity(0.08)
+
             if let image = PixelCrusherImageLoader.orientedNSImage(from: url) {
                 Image(nsImage: image)
                     .resizable()
-                    .aspectRatio(contentMode: .fill)
+                    .aspectRatio(contentMode: .fit)
+                    .padding(4)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .clipped()
             } else {
                 ZStack {
                     Color.secondary.opacity(0.15)
