@@ -735,7 +735,7 @@ struct ContentView: View {
         model.results
             .filter { ($0.state == .done || $0.state == .failed) && !dismissedProcessedItemIDs.contains($0.id) }
             .sorted { lhs, rhs in
-                lhs.enqueuedOrder > rhs.enqueuedOrder
+                lhs.enqueuedOrder < rhs.enqueuedOrder
             }
     }
 
