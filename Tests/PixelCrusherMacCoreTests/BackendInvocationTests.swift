@@ -56,9 +56,9 @@ if [ "$cmd" = "diagnostics" ]; then
 fi
 if [ "$cmd" = "process" ]; then
   cat >/dev/null
-  echo '{"type":"status","state":"processing","message":"Processing image","progress":45}'
-  echo '{"type":"status","state":"optimizing","message":"Optimizing output","progress":80}'
-  echo '{"type":"result","ok":true,"result":{"input_path":"/tmp/input.png","output_path":"\(outputPath)","format":"png","input_size":100,"output_size":80,"duration_ms":15,"stages_run":["pngquant","pngcrush"]}}'
+  echo '{"event":"status","payload":{"phase":"transform","message":"Processing image","progress_percent":45}}'
+  echo '{"event":"status","payload":{"phase":"optimize","message":"Optimizing output","progress_percent":80}}'
+  echo '{"event":"finished","payload":{"success":true,"report":{"source_path":"/tmp/input.png","destination_path":"\(outputPath)","asset_format":"png","input_bytes":100,"output_bytes":80,"elapsed_ms":15,"applied_stages":["pngquant","pngcrush"]},"error":null}}'
   exit 0
 fi
 exit 1
@@ -99,7 +99,7 @@ exit 1
 set -e
 cmd="$1"
 if [ "$cmd" = "diagnostics" ]; then
-  echo '[{"name":"cjpeg","available":true,"source":"/App/BundledTools/bin/cjpeg","source_kind":"bundled"},{"name":"pngquant","available":false,"source":null,"source_kind":null}]'
+  echo '[{"tool":"cjpeg","is_available":true,"resolved_path":"/App/BundledTools/bin/cjpeg","resolution":"bundled"},{"tool":"pngquant","is_available":false,"resolved_path":null,"resolution":null}]'
   exit 0
 fi
 echo '{"type":"result","ok":false,"error":"not implemented"}'
@@ -121,5 +121,65 @@ exit 1
         #expect(cjpeg?.isAvailable == true)
         #expect(cjpeg?.source == .bundled)
         #expect(pngquant?.isAvailable == false)
+    }
+
+    @Test("Backend request encodes crop anchor and resize transform")
+    func encodesTransformOptions() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("pixelcrusher-transform-options-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let outputPath = tempDir.appendingPathComponent("out.png").path
+        let requestPath = tempDir.appendingPathComponent("request.json").path
+        let cliScript = tempDir.appendingPathComponent("fake-pixelcrusher-cli")
+
+        try """
+#!/bin/sh
+set -e
+cmd="$1"
+if [ "$cmd" = "diagnostics" ]; then
+  echo '[]'
+  exit 0
+fi
+if [ "$cmd" = "process" ]; then
+  cat > "\(requestPath)"
+  echo '{"event":"finished","payload":{"success":true,"report":{"source_path":"/tmp/input.png","destination_path":"\(outputPath)","asset_format":"png","input_bytes":100,"output_bytes":90,"elapsed_ms":11,"applied_stages":["pngquant"]},"error":null}}'
+  exit 0
+fi
+exit 1
+""".write(to: cliScript, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cliScript.path)
+
+        let inputFile = tempDir.appendingPathComponent("input.png")
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: inputFile)
+
+        let client = PixelCrusherBackendClient(
+            cliExecutableURL: cliScript,
+            environment: ProcessInfo.processInfo.environment,
+            bundledToolsDirectory: nil,
+            outputDirectory: tempDir
+        )
+
+        _ = try client.processImage(
+            at: inputFile,
+            options: ImageProcessingOptions(
+                autoTrimTransparentBorders: false,
+                fixedCropSize: try CropSize(width: 256, height: 128),
+                fixedResizeSize: try CropSize(width: 512, height: 256),
+                fixedCropAnchor: .bottomRight
+            )
+        )
+
+        let requestData = try #require(FileManager.default.contents(atPath: requestPath))
+        let json = try JSONSerialization.jsonObject(with: requestData) as? [String: Any]
+        let options = json?["options"] as? [String: Any]
+        let transform = options?["transform"] as? [String: Any]
+
+        #expect(options?["trim_transparent"] as? Bool == false)
+        #expect(transform?["crop_width"] as? Int == 256)
+        #expect(transform?["crop_height"] as? Int == 128)
+        #expect(transform?["crop_anchor"] as? String == "bottom_right")
+        #expect(transform?["resize_width"] as? Int == 512)
+        #expect(transform?["resize_height"] as? Int == 256)
     }
 }

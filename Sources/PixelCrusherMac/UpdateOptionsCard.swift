@@ -2,30 +2,59 @@ import SwiftUI
 import AppKit
 import PixelCrusherMacCore
 
+struct UpdateRepositorySettings {
+    let owner: String
+    let repo: String
+    let bundleIdentifier: String
+    let appName: String
+
+    var releasesPageURL: URL {
+        URL(string: "https://github.com/\(owner)/\(repo)/releases")!
+    }
+
+    static func fromBundle(_ bundle: Bundle) -> UpdateRepositorySettings {
+        let defaults = UpdateRepositorySettings(
+            owner: "lubomirmolin",
+            repo: "pixelcrusher",
+            bundleIdentifier: "com.lubo.pixelcrusher",
+            appName: "PixelCrusher"
+        )
+
+        func value(for key: String) -> String? {
+            guard let raw = bundle.object(forInfoDictionaryKey: key) as? String else {
+                return nil
+            }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        return UpdateRepositorySettings(
+            owner: value(for: "PixelCrusherGitHubOwner") ?? defaults.owner,
+            repo: value(for: "PixelCrusherGitHubRepo") ?? defaults.repo,
+            bundleIdentifier: value(for: "PixelCrusherBundleIdentifier") ?? defaults.bundleIdentifier,
+            appName: value(for: "PixelCrusherAppName") ?? defaults.appName
+        )
+    }
+}
+
 @MainActor
 final class UpdateCheckViewModel: ObservableObject {
     @Published private(set) var state: InAppUpdaterState = .idle
     @Published private(set) var latestVersion: String?
     @Published private(set) var releaseNotes: String?
 
+    private let repository: UpdateRepositorySettings
     private let currentVersionProvider: () -> String
     private var latestCheckResult: UpdateCheckResult?
     private var stateMachine = InAppUpdaterStateMachine()
 
-    private let owner = "lubomirmolin"
-    private let repo = "pixelcrusher"
-    private let bundleIdentifier = "com.lubo.pixelcrusher"
-    private let appName = "PixelCrusher"
-
-    private var releasesPageURL: URL {
-        URL(string: "https://github.com/\(owner)/\(repo)/releases")!
-    }
-
     init(
+        repository: UpdateRepositorySettings = .fromBundle(.main),
         currentVersionProvider: @escaping () -> String = {
             (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.0.0"
         }
     ) {
+        self.repository = repository
         self.currentVersionProvider = currentVersionProvider
     }
 
@@ -140,7 +169,7 @@ final class UpdateCheckViewModel: ObservableObject {
     }
 
     func openReleasesPage() {
-        NSWorkspace.shared.open(releasesPageURL)
+        NSWorkspace.shared.open(repository.releasesPageURL)
     }
 
     private func consumeInstallProgress(_ stage: InAppUpdaterInstallProgress) {
@@ -162,11 +191,11 @@ final class UpdateCheckViewModel: ObservableObject {
     private func makeUpdater() -> GitHubInAppUpdater {
         let authToken = GitHubTokenResolver.resolve()
         let configuration = UpdateRepositoryConfiguration(
-            owner: owner,
-            repo: repo,
-            appName: appName,
-            bundleIdentifier: bundleIdentifier,
-            releasesPageURL: releasesPageURL,
+            owner: repository.owner,
+            repo: repository.repo,
+            appName: repository.appName,
+            bundleIdentifier: repository.bundleIdentifier,
+            releasesPageURL: repository.releasesPageURL,
             authToken: authToken
         )
 

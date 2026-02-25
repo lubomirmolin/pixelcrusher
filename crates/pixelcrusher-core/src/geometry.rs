@@ -1,4 +1,5 @@
-use image::{DynamicImage, GenericImageView, RgbaImage, imageops::FilterType};
+use crate::model::CropAnchor;
+use image::{DynamicImage, RgbaImage, imageops::FilterType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CropBox {
@@ -9,10 +10,35 @@ pub struct CropBox {
 }
 
 pub fn center_crop_box(src_w: u32, src_h: u32, target_w: u32, target_h: u32) -> CropBox {
+    anchored_crop_box(src_w, src_h, target_w, target_h, CropAnchor::Center)
+}
+
+pub fn anchored_crop_box(
+    src_w: u32,
+    src_h: u32,
+    target_w: u32,
+    target_h: u32,
+    anchor: CropAnchor,
+) -> CropBox {
     let width = target_w.min(src_w).max(1);
     let height = target_h.min(src_h).max(1);
-    let x = (src_w.saturating_sub(width)) / 2;
-    let y = (src_h.saturating_sub(height)) / 2;
+    let x = match anchor {
+        CropAnchor::Center | CropAnchor::TopLeft | CropAnchor::BottomLeft => 0,
+        CropAnchor::TopRight | CropAnchor::BottomRight => src_w.saturating_sub(width),
+    };
+    let y = match anchor {
+        CropAnchor::Center | CropAnchor::TopLeft | CropAnchor::TopRight => 0,
+        CropAnchor::BottomLeft | CropAnchor::BottomRight => src_h.saturating_sub(height),
+    };
+
+    let (x, y) = if anchor == CropAnchor::Center {
+        (
+            (src_w.saturating_sub(width)) / 2,
+            (src_h.saturating_sub(height)) / 2,
+        )
+    } else {
+        (x, y)
+    };
 
     CropBox {
         x,
@@ -65,12 +91,10 @@ pub fn resize_image(img: DynamicImage, width: u32, height: u32) -> DynamicImage 
 
 pub fn maybe_apply_crop_resize(
     mut image: DynamicImage,
-    crop_dims: Option<(u32, u32)>,
+    crop_box: Option<CropBox>,
     resize_dims: Option<(u32, u32)>,
 ) -> DynamicImage {
-    if let Some((crop_w, crop_h)) = crop_dims {
-        let (src_w, src_h) = image.dimensions();
-        let crop = center_crop_box(src_w, src_h, crop_w, crop_h);
+    if let Some(crop) = crop_box {
         image = crop_image(image, crop);
     }
 
@@ -94,6 +118,20 @@ mod tests {
             CropBox {
                 x: 300,
                 y: 100,
+                width: 400,
+                height: 300
+            }
+        );
+    }
+
+    #[test]
+    fn anchored_crop_honors_corner_anchor() {
+        let crop = anchored_crop_box(1000, 500, 400, 300, CropAnchor::BottomRight);
+        assert_eq!(
+            crop,
+            CropBox {
+                x: 600,
+                y: 200,
                 width: 400,
                 height: 300
             }

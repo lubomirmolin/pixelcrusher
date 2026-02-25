@@ -4,6 +4,7 @@ public struct ImageProcessingOptions: Sendable {
     public var overwriteOriginal: Bool
     public var autoTrimTransparentBorders: Bool
     public var fixedCropSize: CropSize?
+    public var fixedResizeSize: CropSize?
     public var fixedCropAnchor: CropAnchor
     public var optimizer: OptimizerPreferences
     public var outputSuffix: String
@@ -12,6 +13,7 @@ public struct ImageProcessingOptions: Sendable {
         overwriteOriginal: Bool = false,
         autoTrimTransparentBorders: Bool = true,
         fixedCropSize: CropSize? = nil,
+        fixedResizeSize: CropSize? = nil,
         fixedCropAnchor: CropAnchor = .center,
         optimizer: OptimizerPreferences = OptimizerPreferences(),
         outputSuffix: String = "-processed"
@@ -19,6 +21,7 @@ public struct ImageProcessingOptions: Sendable {
         self.overwriteOriginal = overwriteOriginal
         self.autoTrimTransparentBorders = autoTrimTransparentBorders
         self.fixedCropSize = fixedCropSize
+        self.fixedResizeSize = fixedResizeSize
         self.fixedCropAnchor = fixedCropAnchor
         self.optimizer = optimizer
         self.outputSuffix = outputSuffix
@@ -150,15 +153,15 @@ public struct PixelCrusherBackendClient: Sendable {
         var byTool: [OptimizerTool: OptimizerToolStatus] = [:]
 
         for status in statuses {
-            guard let tool = OptimizerTool(rawValue: status.name) else {
+            guard let tool = OptimizerTool(rawValue: status.tool) else {
                 continue
             }
 
-            let source = status.sourceKind.flatMap(Self.mapSourceKind)
+            let source = status.resolution.flatMap(Self.mapSourceKind)
             byTool[tool] = OptimizerToolStatus(
                 tool: tool,
-                isAvailable: status.available,
-                resolvedPath: status.source,
+                isAvailable: status.isAvailable,
+                resolvedPath: status.resolvedPath,
                 source: source
             )
         }
@@ -188,7 +191,7 @@ public struct PixelCrusherBackendClient: Sendable {
 
         let process = Process()
         process.executableURL = executable
-        process.arguments = ["process", "--json"]
+        process.arguments = ["process"]
         process.environment = mergedEnvironment()
 
         let stdoutPipe = Pipe()
@@ -277,46 +280,47 @@ public struct PixelCrusherBackendClient: Sendable {
             return
         }
 
-        if let status = try? decoder.decode(CLIStatusEnvelope.self, from: lineData), status.type == "status" {
+        if let status = try? decoder.decode(CLIStatusEnvelope.self, from: lineData), status.event == "status" {
             statusHandler?(
                 ProcessingStatusUpdate(
-                    state: Self.mapState(status.state),
-                    message: status.message
+                    state: Self.mapState(status.payload.phase),
+                    message: status.payload.message
                 )
             )
             return
         }
 
-        if let resultEnvelope = try? decoder.decode(CLIResultEnvelope.self, from: lineData), resultEnvelope.type == "result" {
-            if resultEnvelope.ok, let payload = resultEnvelope.result {
+        if let finishedEnvelope = try? decoder.decode(CLIFinishedEnvelope.self, from: lineData),
+           finishedEnvelope.event == "finished" {
+            if finishedEnvelope.payload.success, let payload = finishedEnvelope.payload.report {
                 finalResult = payload
             } else {
-                finalError = resultEnvelope.error ?? "Unknown backend failure"
+                finalError = finishedEnvelope.payload.error ?? "Unknown backend failure"
             }
         }
     }
 
     private func mapReport(inputURL: URL, payload: CLIResultPayload) -> ImageProcessingReport {
-        let outputURL = URL(fileURLWithPath: payload.outputPath)
-        let warning = payload.stagesRun.isEmpty ? "No optimizer stage was executed" : nil
+        let outputURL = URL(fileURLWithPath: payload.destinationPath)
+        let warning = payload.appliedStages.isEmpty ? "No optimizer stage was executed" : nil
 
         let deltaText: String
-        if payload.inputSize <= 0 {
+        if payload.inputBytes <= 0 {
             deltaText = "+0.0%"
         } else {
-            let delta = (Double(payload.outputSize) - Double(payload.inputSize)) / Double(payload.inputSize) * 100.0
+            let delta = (Double(payload.outputBytes) - Double(payload.inputBytes)) / Double(payload.inputBytes) * 100.0
             deltaText = String(format: "%+.1f%%", delta)
         }
 
-        let summary = "pipeline=\(payload.format), tools=\(payload.stagesRun.joined(separator: "+")), size=\(payload.inputSize)B->\(payload.outputSize)B (\(deltaText))"
+        let summary = "pipeline=\(payload.assetFormat), tools=\(payload.appliedStages.joined(separator: "+")), size=\(payload.inputBytes)B->\(payload.outputBytes)B (\(deltaText))"
 
         return ImageProcessingReport(
             inputURL: inputURL,
             outputURL: outputURL,
-            pipelineName: payload.format,
-            selectedTools: payload.stagesRun,
-            inputBytes: Int64(payload.inputSize),
-            outputBytes: Int64(payload.outputSize),
+            pipelineName: payload.assetFormat,
+            selectedTools: payload.appliedStages,
+            inputBytes: Int64(payload.inputBytes),
+            outputBytes: Int64(payload.outputBytes),
             warning: warning,
             summary: summary
         )
@@ -401,13 +405,13 @@ public struct PixelCrusherBackendClient: Sendable {
 
     private static func mapState(_ state: String) -> ProcessingItemState {
         switch state {
-        case "diagnosing", "processing", "preparing":
+        case "discovery", "transform", "preparing":
             return .preparing
-        case "optimizing":
+        case "optimize":
             return .optimizing
         case "saving":
             return .saving
-        case "done", "completed":
+        case "complete", "completed":
             return .done
         case "failed":
             return .failed
@@ -444,36 +448,54 @@ private struct CLIProcessRequest: Encodable {
 
 private struct CLIProcessOptions: Encodable {
     let trimTransparent: Bool
-    let dimensions: CLIDimensions
+    let transform: CLITransform
     let compression: CLICompression
 
     init(from options: ImageProcessingOptions) {
         trimTransparent = options.autoTrimTransparentBorders
-        dimensions = CLIDimensions(
+        transform = CLITransform(
             cropWidth: options.fixedCropSize.map { UInt32($0.width) },
             cropHeight: options.fixedCropSize.map { UInt32($0.height) },
-            resizeWidth: nil,
-            resizeHeight: nil
+            cropAnchor: CLITransform.serializedCropAnchor(options.fixedCropAnchor),
+            resizeWidth: options.fixedResizeSize.map { UInt32($0.width) },
+            resizeHeight: options.fixedResizeSize.map { UInt32($0.height) }
         )
         compression = CLICompression(from: options.optimizer)
     }
 
     enum CodingKeys: String, CodingKey {
         case trimTransparent = "trim_transparent"
-        case dimensions
+        case transform
         case compression
     }
 }
 
-private struct CLIDimensions: Encodable {
+private struct CLITransform: Encodable {
     let cropWidth: UInt32?
     let cropHeight: UInt32?
+    let cropAnchor: String
     let resizeWidth: UInt32?
     let resizeHeight: UInt32?
+
+    static func serializedCropAnchor(_ anchor: CropAnchor) -> String {
+        switch anchor {
+        case .center:
+            return "center"
+        case .topLeft:
+            return "top_left"
+        case .topRight:
+            return "top_right"
+        case .bottomLeft:
+            return "bottom_left"
+        case .bottomRight:
+            return "bottom_right"
+        }
+    }
 
     enum CodingKeys: String, CodingKey {
         case cropWidth = "crop_width"
         case cropHeight = "crop_height"
+        case cropAnchor = "crop_anchor"
         case resizeWidth = "resize_width"
         case resizeHeight = "resize_height"
     }
@@ -522,49 +544,63 @@ private struct CLICompression: Encodable {
 }
 
 private struct CLIToolStatus: Decodable {
-    let name: String
-    let available: Bool
-    let source: String?
-    let sourceKind: String?
+    let tool: String
+    let isAvailable: Bool
+    let resolvedPath: String?
+    let resolution: String?
 
     enum CodingKeys: String, CodingKey {
-        case name
-        case available
-        case source
-        case sourceKind = "source_kind"
+        case tool
+        case isAvailable = "is_available"
+        case resolvedPath = "resolved_path"
+        case resolution
     }
 }
 
 private struct CLIStatusEnvelope: Decodable {
-    let type: String
-    let state: String
-    let message: String
-    let progress: Int?
+    let event: String
+    let payload: CLIStatusPayload
 }
 
-private struct CLIResultEnvelope: Decodable {
-    let type: String
-    let ok: Bool
-    let result: CLIResultPayload?
+private struct CLIStatusPayload: Decodable {
+    let phase: String
+    let message: String
+    let progressPercent: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case phase
+        case message
+        case progressPercent = "progress_percent"
+    }
+}
+
+private struct CLIFinishedEnvelope: Decodable {
+    let event: String
+    let payload: CLIFinishedPayload
+}
+
+private struct CLIFinishedPayload: Decodable {
+    let success: Bool
+    let report: CLIResultPayload?
     let error: String?
 }
 
 private struct CLIResultPayload: Decodable {
-    let inputPath: String
-    let outputPath: String
-    let format: String
-    let inputSize: UInt64
-    let outputSize: UInt64
-    let durationMs: UInt64
-    let stagesRun: [String]
+    let sourcePath: String
+    let destinationPath: String
+    let assetFormat: String
+    let inputBytes: UInt64
+    let outputBytes: UInt64
+    let elapsedMs: UInt64
+    let appliedStages: [String]
 
     enum CodingKeys: String, CodingKey {
-        case inputPath = "input_path"
-        case outputPath = "output_path"
-        case format
-        case inputSize = "input_size"
-        case outputSize = "output_size"
-        case durationMs = "duration_ms"
-        case stagesRun = "stages_run"
+        case sourcePath = "source_path"
+        case destinationPath = "destination_path"
+        case assetFormat = "asset_format"
+        case inputBytes = "input_bytes"
+        case outputBytes = "output_bytes"
+        case elapsedMs = "elapsed_ms"
+        case appliedStages = "applied_stages"
     }
 }

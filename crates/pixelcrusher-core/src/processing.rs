@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -7,16 +7,16 @@ use image::{DynamicImage, GenericImageView, ImageFormat as ImgFormat};
 
 use crate::format::{AssetFormat, detect_format};
 use crate::geometry::{
-    center_crop_box, crop_image, maybe_apply_crop_resize, trim_transparent_bounds,
+    anchored_crop_box, crop_image, maybe_apply_crop_resize, trim_transparent_bounds,
 };
+use crate::model::{ProcessingOptions, ProcessingReport};
 use crate::optimizer::optimize_asset;
-use crate::types::{ProcessOptions, ProcessResult};
 
-pub fn process_file(
+pub fn process_asset(
     input_path: &Path,
     output_dir: &Path,
-    options: &ProcessOptions,
-) -> Result<ProcessResult> {
+    options: &ProcessingOptions,
+) -> Result<ProcessingReport> {
     let started = Instant::now();
     let format = detect_format(input_path);
 
@@ -51,45 +51,44 @@ pub fn process_file(
             }
         }
 
-        let crop_dims = options
-            .dimensions
+        let crop_box = options
+            .transform
             .crop_width
-            .zip(options.dimensions.crop_height)
+            .zip(options.transform.crop_height)
             .map(|(w, h)| {
                 let (src_w, src_h) = image.dimensions();
-                let cb = center_crop_box(src_w, src_h, w, h);
-                (cb.width, cb.height)
+                anchored_crop_box(src_w, src_h, w, h, options.transform.crop_anchor)
             });
 
         let resize_dims = options
-            .dimensions
+            .transform
             .resize_width
-            .zip(options.dimensions.resize_height);
+            .zip(options.transform.resize_height);
 
-        image = maybe_apply_crop_resize(image, crop_dims, resize_dims);
+        image = maybe_apply_crop_resize(image, crop_box, resize_dims);
 
         save_dynamic_image(&image, &staging_path, format)?;
     } else {
         fs::copy(input_path, &staging_path)?;
     }
 
-    let stages_run = optimize_asset(format, &staging_path, &output_path, &options.compression)?;
+    let applied_stages = optimize_asset(format, &staging_path, &output_path, &options.compression)?;
     let _ = fs::remove_file(&staging_path);
 
     let output_meta = fs::metadata(&output_path)?;
 
-    Ok(ProcessResult {
-        input_path: input_path.display().to_string(),
-        output_path: output_path.display().to_string(),
-        format: format.as_str().to_string(),
-        input_size: input_meta.len(),
-        output_size: output_meta.len(),
-        duration_ms: started.elapsed().as_millis(),
-        stages_run,
+    Ok(ProcessingReport {
+        source_path: input_path.display().to_string(),
+        destination_path: output_path.display().to_string(),
+        asset_format: format.as_str().to_string(),
+        input_bytes: input_meta.len(),
+        output_bytes: output_meta.len(),
+        elapsed_ms: started.elapsed().as_millis(),
+        applied_stages,
     })
 }
 
-fn save_dynamic_image(image: &DynamicImage, path: &PathBuf, format: AssetFormat) -> Result<()> {
+fn save_dynamic_image(image: &DynamicImage, path: &Path, format: AssetFormat) -> Result<()> {
     match format {
         AssetFormat::Png => image.save_with_format(path, ImgFormat::Png)?,
         AssetFormat::Jpeg => image.save_with_format(path, ImgFormat::Jpeg)?,
