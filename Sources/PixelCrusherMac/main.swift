@@ -6,6 +6,31 @@ import Foundation
 import ImageIO
 import CoreImage
 
+private extension Notification.Name {
+    static let pixelCrusherOpenFiles = Notification.Name("PixelCrusherOpenFiles")
+}
+
+@MainActor
+private final class ExternalOpenFilesCoordinator {
+    static let shared = ExternalOpenFilesCoordinator()
+
+    private var pending: [URL] = []
+
+    func enqueue(_ urls: [URL]) {
+        guard !urls.isEmpty else {
+            return
+        }
+        pending.append(contentsOf: urls)
+        NotificationCenter.default.post(name: .pixelCrusherOpenFiles, object: nil)
+    }
+
+    func drain() -> [URL] {
+        let urls = pending
+        pending.removeAll(keepingCapacity: true)
+        return urls
+    }
+}
+
 struct ProcessingResult: Identifiable {
     let id: UUID
     let inputURL: URL
@@ -38,14 +63,6 @@ struct CommandLineParser {
                 .filter { !$0.isEmpty }
                 .map { URL(fileURLWithPath: $0) }
             return .batch(paths)
-        }
-
-        let candidateFileArgs = args.filter {
-            !$0.hasPrefix("-") && !$0.hasPrefix("-psn_")
-        }.map { URL(fileURLWithPath: $0) }
-
-        if !candidateFileArgs.isEmpty {
-            return .batch(candidateFileArgs)
         }
 
         return .ui
@@ -114,6 +131,16 @@ final class AppViewModel: ObservableObject {
 
     private let defaults: UserDefaults
     private let processor = ImageProcessor()
+    nonisolated static let supportedImageExtensions: Set<String> = ["png", "jpg", "jpeg", "svg", "gif"]
+    nonisolated static let supportedFormatsLabel = "PNG/JPG/JPEG/SVG/GIF"
+    nonisolated static let supportedImageUTTypes: [UTType] = [
+        .png,
+        .jpeg,
+        .gif,
+        UTType(filenameExtension: "svg")
+    ].compactMap { $0 }
+    nonisolated static let supportedImageTypeIdentifiers: [String] = supportedImageUTTypes.map(\.identifier)
+    nonisolated static let folderTypeIdentifiers: [String] = [UTType.folder.identifier]
 
     @Published var overwriteOriginal: Bool {
         didSet { defaults.set(overwriteOriginal, forKey: DefaultsKey.overwriteOriginal) }
@@ -309,12 +336,7 @@ final class AppViewModel: ObservableObject {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = true
-        panel.allowedContentTypes = [
-            UTType.png,
-            UTType.jpeg,
-            UTType.gif,
-            UTType(filenameExtension: "svg")
-        ].compactMap { $0 }
+        panel.allowedContentTypes = Self.supportedImageUTTypes
 
         guard panel.runModal() == .OK else { return }
         for url in panel.urls {
@@ -330,6 +352,12 @@ final class AppViewModel: ObservableObject {
 
         guard panel.runModal() == .OK, let folder = panel.url else { return }
         enqueueInput(url: folder)
+    }
+
+    func enqueueExternal(urls: [URL]) {
+        for url in urls {
+            enqueueInput(url: url)
+        }
     }
 
     func cancelQueuedJobs() {
@@ -385,10 +413,6 @@ final class AppViewModel: ObservableObject {
 
             let files = collectSupportedFiles(in: url)
             if files.isEmpty {
-                appendImmediateFailure(
-                    inputURL: url,
-                    message: "No supported images found in folder (PNG/JPG/JPEG/SVG/GIF)"
-                )
                 return
             }
 
@@ -399,10 +423,6 @@ final class AppViewModel: ObservableObject {
         }
 
         guard Self.isSupportedFile(url) else {
-            appendImmediateFailure(
-                inputURL: url,
-                message: "Skipped (supported: PNG/JPG/JPEG/SVG/GIF)"
-            )
             return
         }
 
@@ -644,7 +664,7 @@ final class AppViewModel: ObservableObject {
     }
 
     nonisolated private static func isSupportedFile(_ url: URL) -> Bool {
-        ["png", "jpg", "jpeg", "svg", "gif"].contains(url.pathExtension.lowercased())
+        supportedImageExtensions.contains(url.pathExtension.lowercased())
     }
 
     nonisolated private static func extractFileURL(from item: NSSecureCoding?) -> URL? {
@@ -671,6 +691,12 @@ final class AppViewModel: ObservableObject {
     }
 }
 
+private enum DropValidationState {
+    case idle
+    case supported
+    case unsupported
+}
+
 struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var model = AppViewModel()
@@ -692,20 +718,22 @@ struct ContentView: View {
     @State private var resizeDraftLock = true
 
     @State private var itemSummary: [UUID: String] = [:]
+    @State private var dismissedProcessedItemIDs: Set<UUID> = []
     @State private var punchSession: PunchSession?
     @State private var playedPunchIDs: Set<UUID> = []
+    @State private var dropValidationState: DropValidationState = .idle
 
     private var isEmptyState: Bool {
-        model.results.isEmpty && punchSession == nil && !model.isQueueRunning
+        processedItems.isEmpty && punchSession == nil && !model.isQueueRunning
     }
 
     private var showBottomHint: Bool {
-        !model.results.isEmpty || punchSession != nil || model.isQueueRunning
+        !processedItems.isEmpty || punchSession != nil || model.isQueueRunning
     }
 
     private var processedItems: [ProcessingResult] {
         model.results
-            .filter { $0.state == .done || $0.state == .failed }
+            .filter { ($0.state == .done || $0.state == .failed) && !dismissedProcessedItemIDs.contains($0.id) }
             .sorted { lhs, rhs in
                 lhs.enqueuedOrder > rhs.enqueuedOrder
             }
@@ -730,11 +758,20 @@ struct ContentView: View {
         }
         .frame(minWidth: 980, minHeight: 700)
         .background(WindowAppearanceConfigurator(opacity: windowOpacity))
-        .onDrop(of: [UTType.fileURL.identifier], isTargeted: $model.isDropTargeted) { providers in
-            model.handleDrop(providers: providers)
-        }
+        .onDrop(
+            of: [UTType.fileURL.identifier],
+            delegate: FileDropDelegate(
+                model: model,
+                validationState: $dropValidationState
+            )
+        )
         .onAppear {
             applyProfile(profile)
+            consumeExternalOpenFiles()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pixelCrusherOpenFiles)) { notification in
+            _ = notification
+            consumeExternalOpenFiles()
         }
         .onChange(of: model.activeItemID) { _ in
             syncPunchSession()
@@ -804,39 +841,46 @@ struct ContentView: View {
             if isEmptyState {
                 emptyStatePane
             } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(spacing: 14) {
-                            if !processedItems.isEmpty {
-                                ForEach(processedItems) { result in
-                                    resultRow(for: result)
+                VStack(spacing: 0) {
+                    processedListHeader
+
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            VStack(spacing: 14) {
+                                if !processedItems.isEmpty {
+                                    ForEach(processedItems) { result in
+                                        resultRow(for: result)
+                                    }
                                 }
-                            }
 
-                            if let active = punchSession {
-                                punchSection(for: active)
-                            } else if model.isQueueRunning {
-                                idleProcessingSection
-                            }
+                                if let active = punchSession {
+                                    punchSection(for: active)
+                                } else if model.isQueueRunning {
+                                    idleProcessingSection
+                                }
 
-                            if processedItems.isEmpty && !model.isQueueRunning && punchSession == nil {
-                                Text("Add files to start crushing.")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                                    .padding(.vertical, 24)
-                            }
+                                if processedItems.isEmpty && !model.isQueueRunning && punchSession == nil {
+                                    Text("Add files to start crushing.")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                        .padding(.vertical, 24)
+                                }
 
-                            Color.clear
-                                .frame(height: 1)
-                                .id(processingScrollBottomID)
+                                Color.clear
+                                    .frame(height: 1)
+                                    .id(processingScrollBottomID)
+                            }
+                            .padding(16)
                         }
-                        .padding(16)
-                    }
-                    .onChange(of: model.results.count) { _ in
-                        scrollToProcessingBottom(proxy)
-                    }
-                    .onChange(of: punchSession?.id) { _ in
-                        scrollToProcessingBottom(proxy)
+                        .onChange(of: model.results.count) { _ in
+                            scrollToProcessingBottom(proxy)
+                        }
+                        .onChange(of: model.completedCount) { _ in
+                            scrollToProcessingBottom(proxy)
+                        }
+                        .onChange(of: punchSession?.id) { _ in
+                            scrollToProcessingBottom(proxy)
+                        }
                     }
                 }
                 .background(Color(nsColor: colorScheme == .dark
@@ -847,12 +891,56 @@ struct ContentView: View {
         }
     }
 
+    private var processedListHeader: some View {
+        HStack {
+            Text("Processed images")
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.9) : Color.primary)
+
+            Spacer()
+
+            Button("Clear") {
+                clearProcessedItems()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(processedItems.isEmpty)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(
+            Color(nsColor: colorScheme == .dark
+                ? NSColor(calibratedWhite: 0.13, alpha: 0.9)
+                : NSColor(calibratedWhite: 0.95, alpha: 0.9)
+            )
+        )
+        .overlay(alignment: .bottom) {
+            Divider().opacity(0.55)
+        }
+    }
+
     private func scrollToProcessingBottom(_ proxy: ScrollViewProxy) {
         DispatchQueue.main.async {
             withAnimation(.easeOut(duration: 0.2)) {
                 proxy.scrollTo(processingScrollBottomID, anchor: .bottom)
             }
         }
+    }
+
+    private func consumeExternalOpenFiles() {
+        let urls = ExternalOpenFilesCoordinator.shared.drain()
+        guard !urls.isEmpty else {
+            return
+        }
+        model.enqueueExternal(urls: urls)
+    }
+
+    private func clearProcessedItems() {
+        let idsToDismiss = model.results
+            .filter { $0.state == .done || $0.state == .failed }
+            .map(\.id)
+
+        dismissedProcessedItemIDs.formUnion(idsToDismiss)
     }
 
     private var emptyStatePane: some View {
@@ -1056,21 +1144,32 @@ struct ContentView: View {
     }
 
     private var dragOverlay: some View {
-        RoundedRectangle(cornerRadius: 16, style: .continuous)
+        let isUnsupported = dropValidationState == .unsupported
+        let tintColor = isUnsupported ? Color.red : Color.accentColor
+        let title = isUnsupported ? "Unsupported format" : "Drop to crush"
+
+        return RoundedRectangle(cornerRadius: 16, style: .continuous)
             .strokeBorder(style: StrokeStyle(lineWidth: 3, dash: [10]))
-            .foregroundStyle(Color.accentColor.opacity(0.8))
+            .foregroundStyle(tintColor.opacity(0.8))
             .background(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color.accentColor.opacity(0.15))
+                    .fill(tintColor.opacity(isUnsupported ? 0.2 : 0.15))
             )
             .overlay(
-                HStack(spacing: 8) {
-                    Image(systemName: "arrow.down.circle.fill")
-                    Text("Drop to crush")
-                        .fontWeight(.semibold)
+                VStack(spacing: 6) {
+                    HStack(spacing: 8) {
+                        Image(systemName: isUnsupported ? "exclamationmark.triangle.fill" : "arrow.down.circle.fill")
+                        Text(title)
+                            .fontWeight(.semibold)
+                    }
+                    if isUnsupported {
+                        Text("Supported: \(AppViewModel.supportedFormatsLabel)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .font(.headline)
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(tintColor)
                 .padding(.horizontal, 18)
                 .padding(.vertical, 10)
                 .background(.regularMaterial, in: Capsule())
@@ -1230,6 +1329,59 @@ struct ContentView: View {
         }
         .padding(18)
         .frame(width: 360)
+    }
+}
+
+@MainActor
+private struct FileDropDelegate: DropDelegate {
+    let model: AppViewModel
+    @Binding var validationState: DropValidationState
+
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [UTType.fileURL.identifier])
+    }
+
+    func dropEntered(info: DropInfo) {
+        model.isDropTargeted = true
+        validationState = dropValidation(for: info)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        model.isDropTargeted = true
+        validationState = dropValidation(for: info)
+        return DropProposal(operation: .copy)
+    }
+
+    func dropExited(info: DropInfo) {
+        _ = info
+        model.isDropTargeted = false
+        validationState = .idle
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        model.isDropTargeted = false
+        defer { validationState = .idle }
+        let providers = info.itemProviders(for: [UTType.fileURL.identifier])
+        guard !providers.isEmpty else {
+            return false
+        }
+        return model.handleDrop(providers: providers)
+    }
+
+    private func dropValidation(for info: DropInfo) -> DropValidationState {
+        let hasFileURLs = info.hasItemsConforming(to: [UTType.fileURL.identifier])
+        guard hasFileURLs else {
+            return .idle
+        }
+
+        let hasSupportedImages = info.hasItemsConforming(to: AppViewModel.supportedImageTypeIdentifiers)
+        let hasFolder = info.hasItemsConforming(to: AppViewModel.folderTypeIdentifiers)
+
+        if hasSupportedImages || hasFolder {
+            return .supported
+        }
+
+        return .unsupported
     }
 }
 
@@ -1763,11 +1915,44 @@ private enum CompressionProfile: CaseIterable {
 }
 
 struct PixelCrusherDesktopApp: App {
+    @NSApplicationDelegateAdaptor(PixelCrusherAppDelegate.self) private var appDelegate
+
     var body: some Scene {
-        WindowGroup("Pixel Crusher") {
+        Window("Pixel Crusher", id: "pixelcrusher-main-window") {
             ContentView()
         }
         .windowResizability(.automatic)
+    }
+}
+
+final class PixelCrusherAppDelegate: NSObject, NSApplicationDelegate {
+    func application(_ sender: NSApplication, openFile filename: String) -> Bool {
+        handleOpen(paths: [filename])
+        return true
+    }
+
+    func application(_ application: NSApplication, openFiles filenames: [String]) {
+        handleOpen(paths: filenames)
+        application.reply(toOpenOrPrint: .success)
+    }
+
+    private func handleOpen(paths: [String]) {
+        let urls = paths
+            .filter { !$0.isEmpty }
+            .map { URL(fileURLWithPath: $0) }
+
+        guard !urls.isEmpty else {
+            return
+        }
+
+        DispatchQueue.main.async {
+            ExternalOpenFilesCoordinator.shared.enqueue(urls)
+
+            NSApp.activate(ignoringOtherApps: true)
+            for window in NSApp.windows {
+                window.makeKeyAndOrderFront(nil)
+            }
+        }
     }
 }
 
