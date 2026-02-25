@@ -4,7 +4,7 @@ version = "0.1.9"
 description = "PixelCrusher desktop app"
 authors = ["Bartando"]
 license = "MIT"
-repository = ""
+repository = "https://github.com/lubomirmolin/pixelcrusher"
 edition = "2021"
 rust-version = "1.77.2"
 
@@ -29,5 +29,4 @@ pixelcrusher-core = { path = "../crates/pixelcrusher-core" }
 
 [dev-dependencies]
 tempfile = "3"
-
 

@@ -10,6 +10,22 @@ PixelCrusher is now a **native macOS SwiftUI app** backed by a Rust processing e
 
 The Tauri app path is used for Windows/Linux installers, while macOS release artifacts are produced by the SwiftUI packaging pipeline.
 
+## Architecture
+
+PixelCrusher is organized as layered application surfaces over one shared Rust engine:
+
+- `crates/pixelcrusher-core`: source of truth for processing contracts, queue state machine, and optimizer pipeline orchestration.
+- `Sources/PixelCrusherMac` + `Sources/PixelCrusherMacCore`: native macOS UI and host-side bridge to the core engine.
+- `src-tauri`: Windows/Linux desktop host (Tauri) exposing command endpoints for queueing, file access, diagnostics, and updater operations.
+- `src`: React UI for Tauri builds, with feature-level state/reducer modules and UI components.
+
+Tauri app runtime flow:
+
+1. UI dispatches commands/events via `@tauri-apps/api`.
+2. Tauri command modules validate input and coordinate queue/update actions.
+3. Queue processing delegates to `pixelcrusher-core`.
+4. State updates are emitted back to UI over `queue://event`.
+
 ## Repository layout
 
 ```text
@@ -18,6 +34,13 @@ pixelcrusher/
   Sources/PixelCrusherMacCore/         # Swift-side queue, options, backend bridge, tool resolver
   Tests/PixelCrusherMacCoreTests/      # Swift tests (resolver, backend invocation, bundle checks)
   crates/pixelcrusher-core/            # Rust processing core + CLI binary (pixelcrusher-cli)
+  src/                                 # React UI for Tauri builds
+    components/                        # Presentational UI pieces
+    state/                             # Reducers and update/queue state logic
+    features/app/                      # App constants, hooks, and utilities
+  src-tauri/                           # Tauri host app (Windows/Linux)
+    src/commands/                      # Tauri command handlers by domain
+    src/bootstrap.rs                   # Runtime setup and state wiring
   scripts/build_bundled_tools.sh       # Bundles optimizer toolchain for native macOS app
   scripts/prepare_tauri_bundled_tools.cjs # Builds bundled optimizer toolchain for Tauri win/linux
   scripts/check_tauri_bundle_tools.cjs # Validates bundled tools are present in built win/linux bundles

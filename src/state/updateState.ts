@@ -1,3 +1,5 @@
+import { RELEASE_OWNER, RELEASE_REPO, RELEASES_PAGE_URL } from '../config/release';
+
 export type RuntimePlatform = 'windows' | 'linux' | 'macos' | 'unknown';
 
 export type UpdateAssetKind =
@@ -173,7 +175,11 @@ function assetPriority(kind: UpdateAssetKind, platform: RuntimePlatform): number
   }
 }
 
-export function isTrustedReleaseAssetUrl(urlRaw: string, owner = 'lubomirmolin', repo = 'pixelcrusher'): boolean {
+export function isTrustedReleaseAssetUrl(
+  urlRaw: string,
+  owner = RELEASE_OWNER,
+  repo = RELEASE_REPO,
+): boolean {
   try {
     const url = new URL(urlRaw);
     if (url.protocol !== 'https:') return false;
@@ -416,7 +422,7 @@ export function updateReducer(state: UpdateFlowState, event: UpdateFlowEvent): U
       return {
         status: 'action-required',
         reason: event.reason,
-        releaseUrl: 'https://github.com/lubomirmolin/pixelcrusher/releases',
+        releaseUrl: RELEASES_PAGE_URL,
         command: event.command,
       };
     case 'FAIL':

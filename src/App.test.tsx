@@ -127,6 +127,22 @@ describe('App Swift-style UI', () => {
     });
   });
 
+  it('shows queue error when only unsupported files are selected', async () => {
+    configureInvoke({
+      select_input_files: ['/Users/demo/assets/notes.txt'],
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole('button', { name: 'Browse Files' }));
+
+    await waitFor(() => {
+      const alert = screen.getByRole('alert');
+      expect(alert.textContent).toContain('Unsupported format');
+    });
+  });
+
   it('opens updates modal and fetches latest release', async () => {
     const user = userEvent.setup();
     render(<App />);
