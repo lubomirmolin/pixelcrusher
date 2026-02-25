@@ -2,6 +2,14 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'r
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
+import {
+  UploadCloud,
+  Crop,
+  Maximize2,
+  CheckCircle2,
+  ArrowRight,
+  X,
+} from 'lucide-react';
 import './App.css';
 import {
   formatBytes,
@@ -109,12 +117,6 @@ const PROFILE_PRESETS: Record<CompressionProfileId, ProfilePreset> = {
 function basename(filePath: string): string {
   const parts = filePath.split(/[\\/]/).filter(Boolean);
   return parts.at(-1) ?? filePath;
-}
-
-function dirname(filePath: string): string {
-  const normalized = filePath.replace(/\\/g, '/');
-  const index = normalized.lastIndexOf('/');
-  return index > 0 ? normalized.slice(0, index) : normalized;
 }
 
 function asOptionalDimension(value: string): number | null {
@@ -244,6 +246,7 @@ function PunchEffectCanvas({ inputPath, onComplete }: { inputPath: string; onCom
     let cancelled = false;
     let blobURL: string | null = null;
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
     setResolvedSrc(null);
 
     const resolveSource = async () => {
@@ -482,10 +485,11 @@ function PunchEffectCanvas({ inputPath, onComplete }: { inputPath: string; onCom
           });
         }
 
-        const fistW = 100;
-        const fistH = 140;
+        const fistScale = 1.45;
+        const fistW = Math.round(100 * fistScale);
+        const fistH = Math.round(140 * fistScale);
         const fistX = (cw - fistW) * 0.5;
-        const targetFistY = imgY - fistH + 25;
+        const targetFistY = Math.max(-20, imgY - fistH * 0.55);
 
         let fistY = -fistH;
         if (localElapsed > 600 && localElapsed <= 1000) {
@@ -579,7 +583,7 @@ function PunchEffectCanvas({ inputPath, onComplete }: { inputPath: string; onCom
     };
   }, [onComplete, resolvedSrc]);
 
-  return <canvas ref={canvasRef} width={260} height={340} className="punch-canvas" />;
+  return <canvas ref={canvasRef} width={320} height={420} className="h-[280px] w-auto object-contain drop-shadow-2xl" />;
 }
 
 function App() {
@@ -591,7 +595,7 @@ function App() {
   const [showUpdateSheet, setShowUpdateSheet] = useState(false);
 
   const [profile, setProfile] = useState<CompressionProfileId>('balanced');
-  const [autoCrop, setAutoCrop] = useState(true);
+  const autoCrop = true;
 
   const [cropWidth, setCropWidth] = useState('');
   const [cropHeight, setCropHeight] = useState('');
@@ -711,25 +715,12 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const activeJobs = useMemo(
-    () =>
-      Object.values(queueState.jobs)
-        .filter((job) => !TERMINAL_JOB_STATUSES.has(job.status))
-        .sort((a, b) => b.progress - a.progress),
-    [queueState.jobs],
-  );
-
   const processedItems = useMemo(
     () => [...queueState.recent].reverse().filter((item) => !dismissedResultIDs.has(item.id)),
     [dismissedResultIDs, queueState.recent],
   );
 
-  const completedCount = useMemo(
-    () => Object.values(queueState.jobs).filter((job) => job.status === 'completed').length,
-    [queueState.jobs],
-  );
 
-  const totalCount = activeJobs.length + completedCount;
 
   const selectedProfile = PROFILE_PRESETS[profile];
 
@@ -1058,278 +1049,337 @@ function App() {
     }
   };
 
-  const recentOutputFolder = useMemo(() => {
-    const latest = queueState.recent[0];
-    return latest?.output_path ? dirname(latest.output_path) : '';
-  }, [queueState.recent]);
 
-  const isEmptyState = processedItems.length === 0 && activePunch == null;
-  const showBottomHint = !isEmptyState || activeJobs.length > 0;
-
-  const clearProcessedItems = () => {
-    setDismissedResultIDs((previous) => {
-      const next = new Set(previous);
-      queueState.recent.forEach((item) => next.add(item.id));
-      return next;
-    });
-  };
 
   const handlePunchComplete = useCallback(() => {
     setActivePunch(null);
   }, []);
 
-  return (
-    <div
-      className="app-shell"
-      onDrop={onDropFiles}
-      onDragEnter={onDragEnter}
-      onDragLeave={onDragLeave}
-      onDragOver={onDragOver}
-    >
-      <header className="titlebar">
-        <div className="titlebar-spacer" />
-        <h1>Pixel Crusher</h1>
-        <div className="titlebar-right">
-          <button className="secondary-btn" onClick={() => setShowUpdateSheet(true)}>
-            Update
-          </button>
-          <label className="checkbox-inline" htmlFor="autocrop-toggle">
-            <input
-              id="autocrop-toggle"
-              type="checkbox"
-              checked={autoCrop}
-              onChange={(event) => setAutoCrop(event.target.checked)}
-            />
-            <span>Autocrop</span>
-          </label>
-          <select
-            aria-label="Compression profile"
-            value={profile}
-            onChange={(event) => setProfile(event.target.value as CompressionProfileId)}
-          >
-            <option value="high">High Quality</option>
-            <option value="balanced">Balanced</option>
-            <option value="smallest">Smallest Size</option>
-          </select>
-        </div>
-      </header>
+  const clearProcessedItems = useCallback(() => {
+    setDismissedResultIDs((previous) => {
+      const next = new Set(previous);
+      queueState.recent.forEach((item) => next.add(item.id));
+      return next;
+    });
+  }, [queueState.recent]);
 
-      <main className="workspace">
-        {isEmptyState ? (
-          <section className="empty-state" data-testid="empty-state">
-            <div className="empty-icon" aria-hidden="true">
-              ⤴
-            </div>
-            <h2>Drag &amp; Drop images here</h2>
-            <p>or</p>
-            <button className="secondary-btn big" onClick={() => void onOpenSystemPicker()}>
-              Browse Files
-            </button>
-            <input ref={fileInputRef} type="file" multiple hidden onChange={onChooseFiles} accept=".png,.jpg,.jpeg,.svg,.gif" />
-          </section>
-        ) : (
-          <section className="content-pane" data-testid="list-state">
-            <div className="list-header">
-              <h2>Processed images</h2>
-              <div className="list-header-actions">
-                <button className="secondary-btn" onClick={clearProcessedItems} disabled={processedItems.length === 0}>
-                  Clear
-                </button>
-                <button
-                  className="secondary-btn"
-                  disabled={!recentOutputFolder}
-                  onClick={() => {
-                    if (recentOutputFolder) {
-                      invoke('reveal_in_finder', { path: recentOutputFolder });
-                    }
-                  }}
+  const isEmptyState = processedItems.length === 0 && activePunch == null;
+
+  return (
+    <div className="h-screen w-screen flex flex-col bg-[#f3f3f3] font-sans antialiased text-[#333] transition-colors duration-300 overflow-hidden" onDrop={onDropFiles} onDragEnter={onDragEnter} onDragLeave={onDragLeave} onDragOver={onDragOver}>
+        <div className="flex-1 overflow-hidden relative flex flex-col">
+          <div className="flex-1 overflow-y-auto relative flex flex-col px-6 py-4">
+            
+            <div className="flex justify-between items-end mb-6">
+              <h1 className="text-2xl font-semibold text-gray-900 tracking-tight">Image Queue</h1>
+              <div className="flex space-x-3 items-center">
+                <select 
+                  value={profile}
+                  onChange={(e) => setProfile(e.target.value as CompressionProfileId)}
+                  aria-label="Compression profile"
+                  className="bg-white border border-gray-300 rounded shadow-sm text-[13px] px-3 py-1.5 outline-none focus:ring-2 focus:ring-[#005fb8]/50 appearance-none pr-8 cursor-pointer text-gray-800"
+                  style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'12\' height=\'12\' fill=\'none\' stroke=\'%23333\' stroke-width=\'2\' stroke-linecap=\'round\' stroke-linejoin=\'round\'%3E%3Cpath d=\'M3 5l3 3 3-3\'/%3E%3C/svg%3E")', backgroundPosition: 'right 8px center', backgroundRepeat: 'no-repeat', backgroundSize: '12px' }}
                 >
-                  Reveal Output Folder
+                  <option value="high">High Quality</option>
+                  <option value="balanced">Balanced</option>
+                  <option value="smallest">Smallest Size</option>
+                </select>
+                <button 
+                  className="bg-[#005fb8] text-white font-semibold rounded text-[13px] px-4 py-1.5 shadow-sm hover:bg-[#0058a6] transition-colors"
+                  onClick={() => setShowUpdateSheet(true)}
+                >
+                  Update
                 </button>
+                <label className="sr-only">
+                  <input
+                    type="checkbox"
+                    checked={autoCrop}
+                    readOnly
+                    aria-label="Autocrop"
+                  />
+                  Autocrop
+                </label>
               </div>
             </div>
 
-            <div className="results-scroll" ref={scrollViewportRef}>
-              {processedItems.map((item) => {
-                const previewPath = item.output_path || item.input_path;
-                const previewSrc = toAssetUrl(previewPath);
-                const savingsText = formatSavings(item.size_delta_percent);
-                const savingsClass = (item.size_delta_percent ?? 0) <= 0 ? 'good' : 'bad';
-
-                return (
-                  <article key={item.id} className="result-row">
-                    <div className="thumb">
-                      {previewSrc ? <img src={previewSrc} alt="" loading="lazy" /> : <span>{basename(item.input_path).charAt(0)}</span>}
-                    </div>
-
-                    <div className="result-main">
-                      <strong>{basename(item.input_path)}</strong>
-                      <p>
-                        <span>{formatBytes(item.input_size)}</span>
-                        <span className="arrow">→</span>
-                        <span className="optimized">{formatBytes(item.output_size)}</span>
-                        {savingsText ? <span className={`delta-pill ${savingsClass}`}>{savingsText}</span> : null}
-                      </p>
-                    </div>
-
-                    <div className="row-actions">
-                      <button className="icon-btn" onClick={() => openItemCropModal(item)} title="Crop image" aria-label="Crop image">
-                        ⌗
-                      </button>
-                      <button className="icon-btn" onClick={() => openItemResizeModal(item)} title="Resize image" aria-label="Resize image">
-                        ⤢
-                      </button>
-                    </div>
-
-                    <div className={`status-indicator ${item.status === 'completed' ? 'ok' : 'bad'}`}>
-                      {item.status === 'completed' ? '✓' : '!'}
-                    </div>
-                  </article>
-                );
-              })}
-
-              {activePunch ? (
-                <div className="punch-zone">
-                  <PunchEffectCanvas inputPath={activePunch.inputPath} onComplete={handlePunchComplete} />
-                  <p>
-                    Crushing <strong>{basename(activePunch.inputPath)}</strong>
-                  </p>
+            {isEmptyState ? (
+              <div className="flex flex-col items-center justify-center text-gray-400 flex-1 border border-dashed border-gray-300 rounded-xl bg-white/50 mb-4" data-testid="empty-state">
+                <div className="w-24 h-24 mb-4 flex items-center justify-center shadow-sm rounded-xl bg-white border border-gray-200">
+                  <UploadCloud size={40} className="text-[#005fb8]" />
                 </div>
-              ) : null}
+                <p className="text-[14px] font-medium text-gray-800">Drag & Drop images here</p>
+                <p className="text-[12px] mt-1">or</p>
+                <button 
+                  onClick={() => void onOpenSystemPicker()}
+                  className="mt-3 px-4 py-1.5 shadow-sm text-[13px] font-medium transition-colors bg-[#005fb8] border border-transparent rounded text-white hover:bg-[#0058a6] active:opacity-80"
+                >
+                  Browse Files
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-col flex-1 gap-4 min-h-0" data-testid="list-state">
+                
+                {processedItems.length > 0 && (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <p className="text-[12px] font-semibold uppercase tracking-wide text-gray-500">Processed images</p>
+                      <button
+                        type="button"
+                        onClick={clearProcessedItems}
+                        className="text-[12px] px-2.5 py-1 rounded bg-white border border-gray-300 text-gray-700 hover:bg-gray-50"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  <div className="space-y-2 w-full flex-1 min-h-0 overflow-y-auto pr-1" ref={scrollViewportRef}>
+                    {processedItems.map(item => {
+                      const previewPath = item.output_path || item.input_path;
+                      const previewSrc = toAssetUrl(previewPath);
+                      const savingsText = formatSavings(item.size_delta_percent);
+                      
+                      return (
+                        <div key={item.id} className="p-3 flex items-center group bg-white rounded-lg shadow-sm border border-gray-200 animate-[slideIn_0.3s_ease-out]">
+                          
+                          <div className="w-14 h-14 overflow-hidden flex-shrink-0 relative rounded-md bg-gray-100">
+                             {previewSrc ? <img src={previewSrc} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center font-bold text-gray-400">{basename(item.input_path).charAt(0)}</div>}
+                          </div>
+                          
+                          <div className="ml-4 flex-1 min-w-0">
+                            <div className="text-[14px] truncate font-semibold text-gray-900">
+                              {basename(item.input_path)}
+                            </div>
+                            <div className="text-[12px] text-gray-500 flex items-center mt-1">
+                              <span>{formatBytes(item.input_size)}</span>
+                              <ArrowRight size={12} className="mx-2" />
+                              <span className="text-green-600 font-medium">{formatBytes(item.output_size)}</span>
+                              {savingsText && (
+                                <span className="ml-2 px-1.5 py-0.5 font-semibold text-[11px] text-green-600">
+                                  {savingsText}
+                                </span>
+                              )}
+                            </div>
+                          </div>
 
-              {!processedItems.length && !activePunch ? <p className="empty-list-note">Add files to start crushing.</p> : null}
+                          <div className="ml-4 flex items-center space-x-2">
+                            <button 
+                              onClick={() => openItemCropModal(item)}
+                              className="p-2 transition-colors bg-transparent rounded hover:bg-black/5 text-gray-600 tooltip-trigger"
+                              title="Crop Image"
+                            >
+                              <Crop size={16} strokeWidth={1.5} />
+                            </button>
+                            <button 
+                              onClick={() => openItemResizeModal(item)}
+                              className="p-2 transition-colors bg-transparent rounded hover:bg-black/5 text-gray-600 tooltip-trigger"
+                              title="Resize Image"
+                            >
+                              <Maximize2 size={16} strokeWidth={1.5} />
+                            </button>
+                          </div>
+                          
+                          <div className="ml-4 w-6 flex justify-end">
+                            {item.status === 'completed' ? (
+                              <CheckCircle2 size={20} className="text-[#107c10]" strokeWidth={1.5} />
+                            ) : (
+                              <div className="text-red-500 font-bold">!</div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  </>
+                )}
+
+                {activePunch && (
+                  <div className="w-full flex flex-col items-center justify-center mt-auto shrink-0 transition-all duration-300 pb-4">
+                    <div className="w-[360px] h-[300px] rounded-2xl bg-transparent flex items-end justify-center overflow-hidden">
+                      <PunchEffectCanvas 
+                        inputPath={activePunch.inputPath} 
+                        onComplete={handlePunchComplete} 
+                      />
+                    </div>
+                    <p className="mt-2 text-sm text-gray-500">
+                      Crushing <strong>{basename(activePunch.inputPath)}</strong>
+                    </p>
+                  </div>
+                )}
+
+              </div>
+            )}
+          </div>
+
+          {dragState !== 'idle' && (
+            <div className={`absolute inset-0 border-4 border-dashed m-4 flex items-center justify-center z-50 backdrop-blur-[2px] transition-all ${dragState === 'unsupported' ? 'bg-[#d7364a]/5 border-[#d7364a]/40' : 'bg-[#005fb8]/5 border-[#005fb8]/40'} rounded-xl`}>
+              <div className="px-6 py-3 shadow-lg font-medium text-[14px] flex items-center bg-white rounded-md text-[#005fb8]">
+                {dragState === 'unsupported' ? (
+                  <>Unsupported format</>
+                ) : (
+                  <><UploadCloud size={18} className="mr-2" /> Drop to crush</>
+                )}
+              </div>
             </div>
-          </section>
-        )}
+          )}
+        </div>
 
-        {queueState.lastError ? <p className="queue-error">{queueState.lastError}</p> : null}
-      </main>
+      <input 
+        type="file" 
+        multiple 
+        className="hidden" 
+        ref={fileInputRef} 
+        onChange={onChooseFiles}
+        accept=".png,.jpg,.jpeg,.svg,.gif"
+      />
 
-      {showBottomHint ? (
-        <footer className="status-footer">
-          <span>Drag and drop to process more images</span>
-          {totalCount > 0 ? (
-            <>
-              <span>•</span>
-              <span>
-                {completedCount}/{totalCount} done
+      {showUpdateSheet && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" role="dialog" aria-label="updates-modal">
+          <div className="w-[400px] shadow-2xl overflow-hidden flex flex-col transform transition-all rounded-lg bg-white border border-gray-300">
+            <div className="h-12 flex items-center justify-between px-6 relative">
+              <span className="font-semibold text-gray-900 text-[15px]">
+                Updates
               </span>
-            </>
-          ) : null}
-          <span>•</span>
-          <span>Profile: {selectedProfile.label}</span>
-        </footer>
-      ) : null}
-
-      {dragState !== 'idle' ? (
-        <div className={`drag-overlay ${dragState === 'unsupported' ? 'unsupported' : ''}`} role="presentation">
-          <div className="drag-pill">
-            <strong>{dragState === 'unsupported' ? 'Unsupported format' : 'Drop to crush'}</strong>
-            {dragState === 'unsupported' ? <span>Supported: {SUPPORTED_FORMATS_LABEL}</span> : null}
-          </div>
-        </div>
-      ) : null}
-
-      {showUpdateSheet ? (
-        <div className="modal-backdrop" role="dialog" aria-label="updates-modal">
-          <div className="modal-card">
-            <div className="modal-top">
-              <h3>Updates</h3>
-              <button className="secondary-btn" onClick={() => setShowUpdateSheet(false)}>
-                Close
+              <button onClick={() => setShowUpdateSheet(false)} className="text-gray-500 hover:text-[#e81123] hover:bg-black/5 p-1 rounded transition-colors">
+                <X size={16} />
               </button>
             </div>
-            <UpdateRail
-              appVersion={appVersion}
-              updateState={updateState}
-              onCheckForUpdates={() => void onCheckForUpdates()}
-              onDownloadUpdate={() => void onDownloadUpdate()}
-              onInstallUpdate={() => void onInstallUpdate()}
-              onOpenReleasePage={(url) => void openReleasePage(url)}
-            />
-          </div>
-        </div>
-      ) : null}
-
-      {activeCropItem ? (
-        <div className="modal-backdrop" role="dialog" aria-label="crop-modal">
-          <div className="modal-card small">
-            <h3>Crop image</h3>
-            <p>{basename(activeCropItem.input_path)}</p>
-            <div className="grid-2">
-              <label>
-                Width
-                <input
-                  type="number"
-                  value={cropDraft.width}
-                  onChange={(event) => setCropDraft((previous) => ({ ...previous, width: event.target.value }))}
-                />
-              </label>
-              <label>
-                Height
-                <input
-                  type="number"
-                  value={cropDraft.height}
-                  onChange={(event) => setCropDraft((previous) => ({ ...previous, height: event.target.value }))}
-                />
-              </label>
-            </div>
-            <div className="modal-actions">
-              <button className="secondary-btn" onClick={() => setActiveCropItem(null)}>
-                Cancel
-              </button>
-              <button className="primary-btn" onClick={applyItemCrop}>
-                Apply
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {activeResizeItem ? (
-        <div className="modal-backdrop" role="dialog" aria-label="resize-modal">
-          <div className="modal-card small">
-            <h3>Resize image</h3>
-            <p>{basename(activeResizeItem.input_path)}</p>
-            <div className="grid-2">
-              <label>
-                Width
-                <input
-                  type="number"
-                  value={resizeDraft.width}
-                  onChange={(event) => setResizeDraft((previous) => ({ ...previous, width: event.target.value }))}
-                />
-              </label>
-              <label>
-                Height
-                <input
-                  type="number"
-                  value={resizeDraft.height}
-                  onChange={(event) => setResizeDraft((previous) => ({ ...previous, height: event.target.value }))}
-                />
-              </label>
-            </div>
-            <label className="checkbox-row">
-              <input
-                type="checkbox"
-                checked={resizeDraft.lock}
-                onChange={(event) => setResizeDraft((previous) => ({ ...previous, lock: event.target.checked }))}
+            <div className="p-6 flex-1 bg-white">
+              <UpdateRail
+                appVersion={appVersion}
+                updateState={updateState}
+                onCheckForUpdates={() => void onCheckForUpdates()}
+                onDownloadUpdate={() => void onDownloadUpdate()}
+                onInstallUpdate={() => void onInstallUpdate()}
+                onOpenReleasePage={(url) => void openReleasePage(url)}
               />
-              <span>Lock aspect ratio</span>
-            </label>
-            <div className="modal-actions">
-              <button className="secondary-btn" onClick={() => setActiveResizeItem(null)}>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeCropItem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="w-[400px] shadow-2xl overflow-hidden flex flex-col transform transition-all rounded-lg bg-white border border-gray-300">
+            <div className="h-12 flex items-center justify-between px-6 relative">
+              <span className="font-semibold text-gray-900 text-[15px]">
+                Crop Image
+              </span>
+              <button onClick={() => setActiveCropItem(null)} className="text-gray-500 hover:text-[#e81123] hover:bg-black/5 p-1 rounded transition-colors">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="p-6 flex-1 bg-white">
+              <div className="space-y-4">
+                <div className="w-full h-48 overflow-hidden relative bg-[#f3f3f3] rounded-md border border-gray-200">
+                  <img src={toAssetUrl(activeCropItem.input_path)} className="w-full h-full object-contain opacity-50" alt="" />
+                  <div className="absolute inset-8 border-2 border-white shadow-[0_0_0_999px_rgba(0,0,0,0.4)] flex items-center justify-center">
+                    <Crop size={24} className="text-white opacity-80" />
+                  </div>
+                </div>
+                <div className="flex items-center space-x-4">
+                  <div className="flex-1">
+                    <label className="block text-[11px] font-medium mb-1 text-gray-800">Width</label>
+                    <input 
+                      type="number" 
+                      value={cropDraft.width}
+                      onChange={(e) => setCropDraft(prev => ({ ...prev, width: e.target.value }))}
+                      className="w-full text-[13px] px-2 py-1.5 focus:outline-none bg-white border-b-2 border-gray-300 rounded text-gray-900 focus:border-[#005fb8]" 
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <label className="block text-[11px] font-medium mb-1 text-gray-800">Height</label>
+                    <input 
+                      type="number" 
+                      value={cropDraft.height}
+                      onChange={(e) => setCropDraft(prev => ({ ...prev, height: e.target.value }))}
+                      className="w-full text-[13px] px-2 py-1.5 focus:outline-none bg-white border-b-2 border-gray-300 rounded text-gray-900 focus:border-[#005fb8]" 
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="p-4 flex justify-end space-x-3 bg-[#f3f3f3] border-t border-gray-200">
+              <button 
+                onClick={() => setActiveCropItem(null)}
+                className="px-6 py-1.5 shadow-sm text-[13px] font-medium transition-colors bg-white border border-gray-300 rounded text-gray-800 hover:bg-gray-50"
+              >
                 Cancel
               </button>
-              <button className="primary-btn" onClick={applyItemResize}>
+              <button 
+                onClick={applyItemCrop}
+                className="px-6 py-1.5 shadow-sm text-[13px] font-medium transition-colors bg-[#005fb8] border border-transparent rounded text-white hover:bg-[#0058a6]"
+              >
                 Apply
               </button>
             </div>
           </div>
         </div>
-      ) : null}
+      )}
+
+      {activeResizeItem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="w-[400px] shadow-2xl overflow-hidden flex flex-col transform transition-all rounded-lg bg-white border border-gray-300">
+            <div className="h-12 flex items-center justify-between px-6 relative">
+              <span className="font-semibold text-gray-900 text-[15px]">
+                Resize Image
+              </span>
+              <button onClick={() => setActiveResizeItem(null)} className="text-gray-500 hover:text-[#e81123] hover:bg-black/5 p-1 rounded transition-colors">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="p-6 flex-1 bg-white">
+              <div className="space-y-4">
+                <div className="flex items-center space-x-4">
+                  <div className="flex-1">
+                    <label className="block text-[11px] font-medium mb-1 text-gray-800">Width</label>
+                    <input 
+                      type="number" 
+                      value={resizeDraft.width}
+                      onChange={(e) => setResizeDraft(prev => ({ ...prev, width: e.target.value }))}
+                      className="w-full text-[13px] px-2 py-1.5 focus:outline-none bg-white border-b-2 border-gray-300 rounded text-gray-900 focus:border-[#005fb8]" 
+                    />
+                  </div>
+                  <div className="mt-5 text-gray-400"><X size={14} /></div>
+                  <div className="flex-1">
+                    <label className="block text-[11px] font-medium mb-1 text-gray-800">Height</label>
+                    <input 
+                      type="number" 
+                      value={resizeDraft.height}
+                      onChange={(e) => setResizeDraft(prev => ({ ...prev, height: e.target.value }))}
+                      className="w-full text-[13px] px-2 py-1.5 focus:outline-none bg-white border-b-2 border-gray-300 rounded text-gray-900 focus:border-[#005fb8]" 
+                    />
+                  </div>
+                </div>
+                <label className="flex items-center space-x-2 mt-4 cursor-pointer">
+                  <input 
+                    type="checkbox" 
+                    checked={resizeDraft.lock}
+                    onChange={(e) => setResizeDraft(prev => ({ ...prev, lock: e.target.checked }))}
+                    className="rounded border-gray-300 text-[#005fb8] focus:ring-[#005fb8]/50 w-4 h-4" 
+                  />
+                  <span className="text-[13px] text-gray-800">Lock aspect ratio</span>
+                </label>
+              </div>
+            </div>
+            <div className="p-4 flex justify-end space-x-3 bg-[#f3f3f3] border-t border-gray-200">
+              <button 
+                onClick={() => setActiveResizeItem(null)}
+                className="px-6 py-1.5 shadow-sm text-[13px] font-medium transition-colors bg-white border border-gray-300 rounded text-gray-800 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={applyItemResize}
+                className="px-6 py-1.5 shadow-sm text-[13px] font-medium transition-colors bg-[#005fb8] border border-transparent rounded text-white hover:bg-[#0058a6]"
+              >
+                Apply
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
+
 }
 
 export default App;
