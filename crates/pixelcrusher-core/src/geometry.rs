@@ -48,6 +48,27 @@ pub fn anchored_crop_box(
     }
 }
 
+pub fn explicit_crop_box(
+    src_w: u32,
+    src_h: u32,
+    target_w: u32,
+    target_h: u32,
+    crop_x: u32,
+    crop_y: u32,
+) -> CropBox {
+    let width = target_w.min(src_w).max(1);
+    let height = target_h.min(src_h).max(1);
+    let max_x = src_w.saturating_sub(width);
+    let max_y = src_h.saturating_sub(height);
+
+    CropBox {
+        x: crop_x.min(max_x),
+        y: crop_y.min(max_y),
+        width,
+        height,
+    }
+}
+
 pub fn trim_transparent_bounds(rgba: &RgbaImage) -> Option<CropBox> {
     let (w, h) = rgba.dimensions();
     let mut min_x = w;
@@ -127,6 +148,20 @@ mod tests {
     #[test]
     fn anchored_crop_honors_corner_anchor() {
         let crop = anchored_crop_box(1000, 500, 400, 300, CropAnchor::BottomRight);
+        assert_eq!(
+            crop,
+            CropBox {
+                x: 600,
+                y: 200,
+                width: 400,
+                height: 300
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_crop_box_is_clamped_to_bounds() {
+        let crop = explicit_crop_box(1000, 500, 400, 300, 900, 450);
         assert_eq!(
             crop,
             CropBox {

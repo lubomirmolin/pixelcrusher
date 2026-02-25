@@ -39,6 +39,8 @@ impl Default for CompressionOptions {
 pub struct TransformOptions {
     pub crop_width: Option<u32>,
     pub crop_height: Option<u32>,
+    pub crop_x: Option<u32>,
+    pub crop_y: Option<u32>,
     pub crop_anchor: CropAnchor,
     pub resize_width: Option<u32>,
     pub resize_height: Option<u32>,

@@ -4,6 +4,7 @@ public struct ImageProcessingOptions: Sendable {
     public var overwriteOriginal: Bool
     public var autoTrimTransparentBorders: Bool
     public var fixedCropSize: CropSize?
+    public var fixedCropOrigin: CropOrigin?
     public var fixedResizeSize: CropSize?
     public var fixedCropAnchor: CropAnchor
     public var optimizer: OptimizerPreferences
@@ -13,6 +14,7 @@ public struct ImageProcessingOptions: Sendable {
         overwriteOriginal: Bool = false,
         autoTrimTransparentBorders: Bool = true,
         fixedCropSize: CropSize? = nil,
+        fixedCropOrigin: CropOrigin? = nil,
         fixedResizeSize: CropSize? = nil,
         fixedCropAnchor: CropAnchor = .center,
         optimizer: OptimizerPreferences = OptimizerPreferences(),
@@ -21,6 +23,7 @@ public struct ImageProcessingOptions: Sendable {
         self.overwriteOriginal = overwriteOriginal
         self.autoTrimTransparentBorders = autoTrimTransparentBorders
         self.fixedCropSize = fixedCropSize
+        self.fixedCropOrigin = fixedCropOrigin
         self.fixedResizeSize = fixedResizeSize
         self.fixedCropAnchor = fixedCropAnchor
         self.optimizer = optimizer
@@ -456,6 +459,8 @@ private struct CLIProcessOptions: Encodable {
         transform = CLITransform(
             cropWidth: options.fixedCropSize.map { UInt32($0.width) },
             cropHeight: options.fixedCropSize.map { UInt32($0.height) },
+            cropX: options.fixedCropOrigin.map { UInt32($0.x) },
+            cropY: options.fixedCropOrigin.map { UInt32($0.y) },
             cropAnchor: CLITransform.serializedCropAnchor(options.fixedCropAnchor),
             resizeWidth: options.fixedResizeSize.map { UInt32($0.width) },
             resizeHeight: options.fixedResizeSize.map { UInt32($0.height) }
@@ -473,6 +478,8 @@ private struct CLIProcessOptions: Encodable {
 private struct CLITransform: Encodable {
     let cropWidth: UInt32?
     let cropHeight: UInt32?
+    let cropX: UInt32?
+    let cropY: UInt32?
     let cropAnchor: String
     let resizeWidth: UInt32?
     let resizeHeight: UInt32?
@@ -495,6 +502,8 @@ private struct CLITransform: Encodable {
     enum CodingKeys: String, CodingKey {
         case cropWidth = "crop_width"
         case cropHeight = "crop_height"
+        case cropX = "crop_x"
+        case cropY = "crop_y"
         case cropAnchor = "crop_anchor"
         case resizeWidth = "resize_width"
         case resizeHeight = "resize_height"

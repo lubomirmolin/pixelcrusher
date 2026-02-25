@@ -12,6 +12,8 @@ final class AppViewModel: ObservableObject {
         static let fixedCropEnabled = "fixedCropEnabled"
         static let fixedCropWidth = "fixedCropWidth"
         static let fixedCropHeight = "fixedCropHeight"
+        static let fixedCropX = "fixedCropX"
+        static let fixedCropY = "fixedCropY"
         static let cropAnchor = "cropAnchor"
         static let fixedResizeEnabled = "fixedResizeEnabled"
         static let fixedResizeWidth = "fixedResizeWidth"
@@ -65,6 +67,14 @@ final class AppViewModel: ObservableObject {
 
     @Published var fixedCropHeight: String {
         didSet { defaults.set(fixedCropHeight, forKey: DefaultsKey.fixedCropHeight) }
+    }
+
+    @Published var fixedCropX: String {
+        didSet { defaults.set(fixedCropX, forKey: DefaultsKey.fixedCropX) }
+    }
+
+    @Published var fixedCropY: String {
+        didSet { defaults.set(fixedCropY, forKey: DefaultsKey.fixedCropY) }
     }
 
     @Published var cropAnchor: CropAnchor {
@@ -169,6 +179,8 @@ final class AppViewModel: ObservableObject {
         fixedCropEnabled = defaults.object(forKey: DefaultsKey.fixedCropEnabled) as? Bool ?? false
         fixedCropWidth = defaults.string(forKey: DefaultsKey.fixedCropWidth) ?? "1024"
         fixedCropHeight = defaults.string(forKey: DefaultsKey.fixedCropHeight) ?? "1024"
+        fixedCropX = defaults.string(forKey: DefaultsKey.fixedCropX) ?? "0"
+        fixedCropY = defaults.string(forKey: DefaultsKey.fixedCropY) ?? "0"
 
         if let rawAnchor = defaults.string(forKey: DefaultsKey.cropAnchor),
            let anchor = CropAnchor(rawValue: rawAnchor) {
@@ -602,6 +614,7 @@ final class AppViewModel: ObservableObject {
 
     private func currentOptions() -> ImageProcessingOptions {
         let fixedCropSize: CropSize?
+        let fixedCropOrigin: CropOrigin?
 
         if fixedCropEnabled,
            let width = Int(fixedCropWidth),
@@ -609,8 +622,17 @@ final class AppViewModel: ObservableObject {
            width > 0,
            height > 0 {
             fixedCropSize = try? CropSize(width: width, height: height)
+            if let x = Int(fixedCropX),
+               let y = Int(fixedCropY),
+               x >= 0,
+               y >= 0 {
+                fixedCropOrigin = try? CropOrigin(x: x, y: y)
+            } else {
+                fixedCropOrigin = nil
+            }
         } else {
             fixedCropSize = nil
+            fixedCropOrigin = nil
         }
 
         let fixedResizeSize: CropSize?
@@ -638,10 +660,15 @@ final class AppViewModel: ObservableObject {
             gifLossyLevel: Int(gifLossyLevel.rounded())
         )
 
+        // Manual crop should be authoritative; running transparent auto-trim first can
+        // collapse the crop source bounds and make the selected crop appear ineffective.
+        let shouldTrimTransparent = autoTrimTransparentBorders && fixedCropSize == nil
+
         return ImageProcessingOptions(
             overwriteOriginal: overwriteOriginal,
-            autoTrimTransparentBorders: autoTrimTransparentBorders,
+            autoTrimTransparentBorders: shouldTrimTransparent,
             fixedCropSize: fixedCropSize,
+            fixedCropOrigin: fixedCropOrigin,
             fixedResizeSize: fixedResizeSize,
             fixedCropAnchor: cropAnchor,
             optimizer: optimizer,

@@ -17,7 +17,8 @@ struct ContentView: View {
 
     @State private var cropDraftWidth = ""
     @State private var cropDraftHeight = ""
-    @State private var cropDraftAnchor: CropAnchor = .center
+    @State private var cropDraftX = ""
+    @State private var cropDraftY = ""
 
     @State private var resizeDraftWidth = ""
     @State private var resizeDraftHeight = ""
@@ -322,8 +323,10 @@ struct ContentView: View {
     }
 
     private func resultRow(for result: ProcessingResult) -> some View {
-        HStack(alignment: .center, spacing: 14) {
-            ResultThumbnail(url: result.inputURL)
+        let thumbnailURL = result.outputURL ?? result.inputURL
+
+        return HStack(alignment: .center, spacing: 14) {
+            ResultThumbnail(url: thumbnailURL)
 
             VStack(alignment: .leading, spacing: 7) {
                 Text(result.inputURL.lastPathComponent)
@@ -362,7 +365,8 @@ struct ContentView: View {
                     cropTarget = result
                     cropDraftWidth = model.fixedCropWidth
                     cropDraftHeight = model.fixedCropHeight
-                    cropDraftAnchor = model.cropAnchor
+                    cropDraftX = model.fixedCropX
+                    cropDraftY = model.fixedCropY
                 }
 
                 actionGlyphButton(symbol: "arrow.up.left.and.arrow.down.right", help: "Resize image") {
@@ -560,53 +564,33 @@ struct ContentView: View {
     }
 
     private func cropSheet(for result: ProcessingResult) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Crop image")
-                .font(.headline)
-            Text(result.inputURL.lastPathComponent)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            HStack {
-                TextField("Width", text: $cropDraftWidth)
-                    .textFieldStyle(.roundedBorder)
-                TextField("Height", text: $cropDraftHeight)
-                    .textFieldStyle(.roundedBorder)
-            }
-
-            Picker("Anchor", selection: $cropDraftAnchor) {
-                Text("Center").tag(CropAnchor.center)
-                Text("Top Left").tag(CropAnchor.topLeft)
-                Text("Top Right").tag(CropAnchor.topRight)
-                Text("Bottom Left").tag(CropAnchor.bottomLeft)
-                Text("Bottom Right").tag(CropAnchor.bottomRight)
-            }
-            .pickerStyle(.menu)
-
-            HStack {
-                Spacer()
-                Button("Cancel") {
-                    cropTarget = nil
+        CropEditorSheet(
+            result: result,
+            widthText: $cropDraftWidth,
+            heightText: $cropDraftHeight,
+            xText: $cropDraftX,
+            yText: $cropDraftY,
+            onCancel: {
+                cropTarget = nil
+            },
+            onApply: {
+                model.fixedCropWidth = cropDraftWidth
+                model.fixedCropHeight = cropDraftHeight
+                model.fixedCropX = cropDraftX
+                model.fixedCropY = cropDraftY
+                model.cropAnchor = .center
+                if let width = Int(cropDraftWidth),
+                   let height = Int(cropDraftHeight),
+                   width > 0,
+                   height > 0 {
+                    model.fixedCropEnabled = true
+                } else {
+                    model.fixedCropEnabled = false
                 }
-                Button("Apply Crop") {
-                    model.fixedCropWidth = cropDraftWidth
-                    model.fixedCropHeight = cropDraftHeight
-                    model.cropAnchor = cropDraftAnchor
-                    if let width = Int(cropDraftWidth),
-                       let height = Int(cropDraftHeight),
-                       width > 0,
-                       height > 0 {
-                        model.fixedCropEnabled = true
-                    } else {
-                        model.fixedCropEnabled = false
-                    }
-                    cropTarget = nil
-                }
-                .buttonStyle(.borderedProminent)
+                model.enqueueExternal(urls: [result.inputURL])
+                cropTarget = nil
             }
-        }
-        .padding(18)
-        .frame(width: 360)
+        )
     }
 
     private func resizeSheet(for result: ProcessingResult) -> some View {

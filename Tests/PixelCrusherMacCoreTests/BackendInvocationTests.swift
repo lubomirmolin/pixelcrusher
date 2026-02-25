@@ -165,6 +165,7 @@ exit 1
             options: ImageProcessingOptions(
                 autoTrimTransparentBorders: false,
                 fixedCropSize: try CropSize(width: 256, height: 128),
+                fixedCropOrigin: try CropOrigin(x: 32, y: 24),
                 fixedResizeSize: try CropSize(width: 512, height: 256),
                 fixedCropAnchor: .bottomRight
             )
@@ -178,6 +179,8 @@ exit 1
         #expect(options?["trim_transparent"] as? Bool == false)
         #expect(transform?["crop_width"] as? Int == 256)
         #expect(transform?["crop_height"] as? Int == 128)
+        #expect(transform?["crop_x"] as? Int == 32)
+        #expect(transform?["crop_y"] as? Int == 24)
         #expect(transform?["crop_anchor"] as? String == "bottom_right")
         #expect(transform?["resize_width"] as? Int == 512)
         #expect(transform?["resize_height"] as? Int == 256)

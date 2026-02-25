@@ -7,7 +7,8 @@ use image::{DynamicImage, GenericImageView, ImageFormat as ImgFormat};
 
 use crate::format::{AssetFormat, detect_format};
 use crate::geometry::{
-    anchored_crop_box, crop_image, maybe_apply_crop_resize, trim_transparent_bounds,
+    anchored_crop_box, crop_image, explicit_crop_box, maybe_apply_crop_resize,
+    trim_transparent_bounds,
 };
 use crate::model::{ProcessingOptions, ProcessingReport};
 use crate::optimizer::optimize_asset;
@@ -57,7 +58,10 @@ pub fn process_asset(
             .zip(options.transform.crop_height)
             .map(|(w, h)| {
                 let (src_w, src_h) = image.dimensions();
-                anchored_crop_box(src_w, src_h, w, h, options.transform.crop_anchor)
+                match options.transform.crop_x.zip(options.transform.crop_y) {
+                    Some((x, y)) => explicit_crop_box(src_w, src_h, w, h, x, y),
+                    None => anchored_crop_box(src_w, src_h, w, h, options.transform.crop_anchor),
+                }
             });
 
         let resize_dims = options
