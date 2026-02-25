@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const invokeMock = vi.fn();
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
+  convertFileSrc: (path: string) => `asset://${path}`,
 }));
 
 vi.mock('@tauri-apps/api/event', () => ({
@@ -34,32 +35,19 @@ const recentResult = {
   duration_ms: 124,
 };
 
-const nestedResult = {
-  id: 'job-2',
-  input_path: '/Users/demo/assets/nested/deeper/poster.png',
-  output_path: '/Users/demo/out/poster_pixelcrusher.png',
-  status: 'completed',
-  input_size: 1500,
-  output_size: 900,
-  size_delta_percent: -40,
-  stages_run: ['pngquant'],
-  duration_ms: 150,
-};
-
 function configureInvoke(overrides?: Partial<Record<string, unknown>>) {
   invokeMock.mockImplementation(async (command: string, payload?: unknown) => {
     if (command === 'recent_results') return overrides?.recent_results ?? [];
     if (command === 'app_version') return '1.2.3';
     if (command === 'runtime_platform') return 'windows';
     if (command === 'select_input_files') return overrides?.select_input_files ?? [];
-    if (command === 'select_input_folder') return overrides?.select_input_folder ?? '/Users/demo/assets';
     if (command === 'enqueue_paths') return overrides?.enqueue_paths ?? payload ?? [];
     if (command === 'open_external_url') return [];
     return [];
   });
 }
 
-describe('App simple UI rewrite', () => {
+describe('App Swift-style UI', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     configureInvoke();
@@ -89,68 +77,38 @@ describe('App simple UI rewrite', () => {
     vi.unstubAllGlobals();
   });
 
-  it('renders empty state with profile selector and top updates entry', async () => {
+  it('renders initial empty view with top controls', async () => {
     render(<App />);
 
     expect(await screen.findByTestId('empty-state')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Update' })).toBeTruthy();
     expect(screen.getByRole('combobox', { name: 'Compression profile' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Open updates' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Browse' })).toBeTruthy();
+    expect(screen.getByRole('checkbox', { name: 'Autocrop' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Browse Files' })).toBeTruthy();
   });
 
-  it('renders list/result state rows when history exists', async () => {
+  it('renders processed list when recent items exist', async () => {
     configureInvoke({ recent_results: [recentResult] });
     render(<App />);
 
     expect(await screen.findByTestId('list-state')).toBeTruthy();
+    expect(screen.getByText('Processed images')).toBeTruthy();
     expect(screen.getByText('banner.png')).toBeTruthy();
-    expect(screen.getByText('1000 B → 700 B')).toBeTruthy();
-    expect(screen.getByText('-30.0%')).toBeTruthy();
+    expect(screen.getByText('-30%')).toBeTruthy();
   });
 
-  it('opens crop and resize modals from item actions', async () => {
+  it('clears processed list back to empty state', async () => {
     configureInvoke({ recent_results: [recentResult] });
     const user = userEvent.setup();
-
     render(<App />);
 
-    await screen.findByText('banner.png');
+    await screen.findByTestId('list-state');
+    await user.click(screen.getByRole('button', { name: 'Clear' }));
 
-    const row = screen.getByText('banner.png').closest('.result-row');
-    expect(row).toBeTruthy();
-    if (!(row instanceof HTMLElement)) {
-      throw new Error('missing row');
-    }
-
-    await user.click(within(row).getByRole('button', { name: 'Crop' }));
-    expect(await screen.findByText('Crop image')).toBeTruthy();
-
-    await user.click(screen.getByRole('button', { name: 'Cancel' }));
-
-    await user.click(within(row).getByRole('button', { name: 'Resize' }));
-    expect(await screen.findByText('Resize image')).toBeTruthy();
+    expect(await screen.findByTestId('empty-state')).toBeTruthy();
   });
 
-  it('renders folder mode with nested tree display', async () => {
-    configureInvoke({
-      recent_results: [nestedResult],
-      select_input_folder: '/Users/demo/assets',
-    });
-
-    const user = userEvent.setup();
-    render(<App />);
-
-    await screen.findByText('poster.png');
-    await user.click(screen.getByRole('button', { name: 'Browse Folder' }));
-
-    expect(await screen.findByText('Folders')).toBeTruthy();
-    expect(screen.getByText('assets')).toBeTruthy();
-    expect(screen.getByText('nested')).toBeTruthy();
-    expect(screen.getByText('deeper')).toBeTruthy();
-    expect(screen.getAllByText('poster.png').length).toBeGreaterThan(0);
-  });
-
-  it('dispatches queue enqueue with selected profile payload (queue/process regression)', async () => {
+  it('applies selected profile to enqueue payload', async () => {
     configureInvoke({
       select_input_files: ['/Users/demo/assets/new-asset.png'],
     });
@@ -159,7 +117,7 @@ describe('App simple UI rewrite', () => {
     render(<App />);
 
     await user.selectOptions(screen.getByRole('combobox', { name: 'Compression profile' }), 'smallest');
-    await user.click(screen.getByRole('button', { name: 'Browse' }));
+    await user.click(screen.getByRole('button', { name: 'Browse Files' }));
 
     await waitFor(() => {
       const enqueueCall = invokeMock.mock.calls.find(([command]) => command === 'enqueue_paths');
@@ -169,11 +127,11 @@ describe('App simple UI rewrite', () => {
     });
   });
 
-  it('checks updates from top area and exposes update actions (updater entry regression)', async () => {
+  it('opens updates modal and fetches latest release', async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(screen.getByRole('button', { name: 'Open updates' }));
+    await user.click(screen.getByRole('button', { name: 'Update' }));
     expect(await screen.findByRole('dialog', { name: 'updates-modal' })).toBeTruthy();
 
     await user.click(screen.getByRole('button', { name: 'Check for Updates' }));

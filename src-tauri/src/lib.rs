@@ -255,6 +255,31 @@ fn select_input_folder() -> Option<String> {
 }
 
 #[tauri::command]
+fn read_image_bytes(path: String) -> Result<Vec<u8>, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Image path is empty.".to_string());
+    }
+
+    let image_path = PathBuf::from(trimmed);
+    if !image_path.exists() || !image_path.is_file() {
+        return Err("Image path does not exist or is not a file.".to_string());
+    }
+
+    if !is_supported_image_path(&image_path) {
+        return Err("Unsupported image format.".to_string());
+    }
+
+    let metadata = std::fs::metadata(&image_path)
+        .map_err(|error| format!("failed to read image metadata: {error}"))?;
+    if metadata.len() > 50 * 1024 * 1024 {
+        return Err("Image is too large for preview.".to_string());
+    }
+
+    std::fs::read(&image_path).map_err(|error| format!("failed to read image bytes: {error}"))
+}
+
+#[tauri::command]
 fn enqueue_paths(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -272,6 +297,20 @@ fn enqueue_paths(
     let mut created = vec![];
 
     for input_path in enqueue_candidates {
+        let already_active = {
+            let jobs = state.jobs.lock().unwrap();
+            jobs.values().any(|job| {
+                job.input_path == input_path
+                    && job.status != JobState::Completed.as_str()
+                    && job.status != JobState::Failed.as_str()
+            })
+        };
+
+        if already_active {
+            log::info!("Skipped duplicate active enqueue for {}", input_path);
+            continue;
+        }
+
         let id = Uuid::new_v4().to_string();
 
         let snapshot = JobSnapshot {
@@ -865,6 +904,7 @@ pub fn run() {
             reveal_in_finder,
             select_input_files,
             select_input_folder,
+            read_image_bytes,
             app_version,
             runtime_platform,
             open_external_url,

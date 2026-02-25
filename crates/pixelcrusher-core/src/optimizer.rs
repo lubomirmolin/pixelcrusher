@@ -4,6 +4,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::io::Write;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::sync::{OnceLock, RwLock};
@@ -216,16 +217,22 @@ pub fn optimize_asset(
     match pipeline_for_format(format) {
         PipelineKind::Jpeg => {
             if let Some(cjpeg) = resolver.resolve_named("cjpeg") {
-                run_command(
+                let ppm_input = swap_extension(output_path, "cjpeg.ppm");
+                write_ppm_from_image(input_path, &ppm_input)?;
+
+                let run_result = run_command(
                     &cjpeg.executable,
                     &[
                         "-quality",
                         &compression.quality.to_string(),
                         "-outfile",
                         output_path.to_string_lossy().as_ref(),
-                        input_path.to_string_lossy().as_ref(),
+                        ppm_input.to_string_lossy().as_ref(),
                     ],
-                )?;
+                );
+
+                let _ = fs::remove_file(&ppm_input);
+                run_result?;
                 stages.push("cjpeg".to_string());
             } else {
                 stages.push("copy".to_string());
@@ -471,10 +478,27 @@ fn swap_extension(path: &Path, suffix: &str) -> PathBuf {
     parent.join(format!("{stem}.{suffix}"))
 }
 
+fn write_ppm_from_image(input_path: &Path, ppm_path: &Path) -> Result<()> {
+    let decoded = image::open(input_path)
+        .with_context(|| format!("failed to decode source for cjpeg {}", input_path.display()))?;
+    let rgb = decoded.to_rgb8();
+    let (width, height) = rgb.dimensions();
+
+    let mut output = fs::File::create(ppm_path)
+        .with_context(|| format!("failed to create temporary cjpeg input {}", ppm_path.display()))?;
+    write!(output, "P6\n{} {}\n255\n", width, height)
+        .with_context(|| format!("failed to write cjpeg ppm header {}", ppm_path.display()))?;
+    output
+        .write_all(rgb.as_raw())
+        .with_context(|| format!("failed to write cjpeg ppm payload {}", ppm_path.display()))?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{ImageFormat, Rgba, RgbaImage};
+    use image::{ImageFormat, Rgb, RgbImage, Rgba, RgbaImage};
     use std::sync::{Mutex, OnceLock};
 
     #[test]
@@ -673,6 +697,77 @@ cp \"$2\" \"$3\"
         assert_eq!(stages, vec!["pngcrush".to_string()]);
         assert!(output_png.exists());
         assert!(fs::metadata(&output_png).unwrap().len() > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn jpeg_pipeline_uses_ppm_input_for_cjpeg() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let input_jpeg = temp.path().join("input.jpg");
+        let output_jpeg = temp.path().join("output.jpg");
+        let fake_cjpeg = temp.path().join("fake-cjpeg");
+
+        let image = RgbImage::from_pixel(2, 2, Rgb([12, 140, 220]));
+        image
+            .save_with_format(&input_jpeg, ImageFormat::Jpeg)
+            .unwrap();
+
+        fs::write(
+            &fake_cjpeg,
+            "#!/bin/sh
+set -eu
+out=\"\"
+input=\"\"
+while [ \"$#\" -gt 0 ]; do
+  if [ \"$1\" = \"-outfile\" ]; then
+    shift
+    out=\"$1\"
+  else
+    input=\"$1\"
+  fi
+  shift
+done
+case \"$input\" in
+  *.ppm) ;;
+  *) echo \"expected ppm input, got: $input\" >&2; exit 1 ;;
+esac
+header=\"$(head -c 2 \"$input\")\"
+if [ \"$header\" != \"P6\" ]; then
+  echo \"missing ppm header\" >&2
+  exit 1
+fi
+cp \"$input\" \"$out\"
+",
+        )
+        .unwrap();
+
+        let mut perms = fs::metadata(&fake_cjpeg).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_cjpeg, perms).unwrap();
+
+        let env_lock = env_lock().lock().unwrap();
+        let previous = std::env::var("PIXELCRUSHER_CJPEG_PATH").ok();
+        unsafe {
+            std::env::set_var("PIXELCRUSHER_CJPEG_PATH", &fake_cjpeg);
+        }
+
+        let compression = CompressionOptions::default();
+        let stages = optimize_asset(AssetFormat::Jpeg, &input_jpeg, &output_jpeg, &compression).unwrap();
+
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var("PIXELCRUSHER_CJPEG_PATH", value);
+            },
+            None => unsafe {
+                std::env::remove_var("PIXELCRUSHER_CJPEG_PATH");
+            },
+        }
+        drop(env_lock);
+
+        assert_eq!(stages, vec!["cjpeg".to_string()]);
+        assert!(output_jpeg.exists());
+        assert!(fs::metadata(&output_jpeg).unwrap().len() > 0);
     }
 
     fn env_lock() -> &'static Mutex<()> {
