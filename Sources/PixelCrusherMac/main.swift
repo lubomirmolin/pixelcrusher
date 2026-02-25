@@ -1586,7 +1586,18 @@ private final class PunchAnimator {
         transformed.translateBy(x: shakeX, y: shakeY)
 
         if elapsed < 1.0 {
-            let pixelSize = elapsed < 0.6 ? 1 + CGFloat(elapsed / 0.6) * 7 : 8
+            let initialImageHold: TimeInterval = 0.18
+            let pixelRampDuration = max(0.001, 1.0 - initialImageHold)
+
+            let pixelSize: CGFloat
+            if elapsed <= initialImageHold {
+                pixelSize = 1
+            } else {
+                let rampProgress = min(1, max(0, CGFloat((elapsed - initialImageHold) / pixelRampDuration)))
+                let easedProgress = pow(rampProgress, 1.2)
+                pixelSize = 1 + easedProgress * 7
+            }
+
             drawPixelatedImage(
                 context: &transformed,
                 imageX: imgX,
