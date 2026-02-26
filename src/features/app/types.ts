@@ -28,6 +28,8 @@ export type ProfilePreset = {
 export type CropDraft = {
   width: string;
   height: string;
+  x: string;
+  y: string;
 };
 
 export type ResizeDraft = {
@@ -39,4 +41,15 @@ export type ResizeDraft = {
 export type PunchQueueItem = {
   id: string;
   inputPath: string;
+  cropTransform?: PunchCropTransform;
+};
+
+export type CropAnchor = 'center' | 'top_left' | 'top_right' | 'bottom_left' | 'bottom_right';
+
+export type PunchCropTransform = {
+  width: number;
+  height: number;
+  x: number | null;
+  y: number | null;
+  anchor: CropAnchor;
 };

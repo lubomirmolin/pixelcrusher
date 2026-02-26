@@ -7,6 +7,7 @@ import {
   initialQueueState,
   queueReducer,
   type JobResultEntry,
+  type JobSnapshot,
   type QueueEventPayload,
 } from '../../../state/queueState';
 import {
@@ -19,6 +20,7 @@ import type {
   CompressionProfileId,
   CropDraft,
   DragValidationState,
+  PunchCropTransform,
   PunchQueueItem,
   ResizeDraft,
 } from '../types';
@@ -30,6 +32,40 @@ import {
   isTauriRuntime,
 } from '../utils';
 
+type EnqueueOptionsPayload = {
+  trim_transparent: boolean;
+  transform: {
+    crop_width?: number | null;
+    crop_height?: number | null;
+    crop_x?: number | null;
+    crop_y?: number | null;
+    crop_anchor?: 'center' | 'top_left' | 'top_right' | 'bottom_left' | 'bottom_right';
+    resize_width: number | null;
+    resize_height: number | null;
+  };
+  compression: {
+    quality: number;
+    png_quant_quality_min: number;
+    png_quant_quality_max: number;
+    run_png_quant: boolean;
+    run_pngcrush: boolean;
+    run_zopfli: boolean;
+    run_pngout: boolean;
+  };
+};
+
+function processingSourcePath(item: JobResultEntry): string {
+  return item.output_path || item.input_path;
+}
+
+function parseNonNegativeCoordinate(raw: string): number {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+  return Math.max(0, Math.floor(parsed));
+}
+
 export function useQueueController() {
   const [queueState, dispatch] = useReducer(queueReducer, initialQueueState);
   const [dragState, setDragState] = useState<DragValidationState>('idle');
@@ -37,14 +73,17 @@ export function useQueueController() {
   const [profile, setProfile] = useState<CompressionProfileId>('balanced');
   const autoCrop = true;
 
-  const [cropWidth, setCropWidth] = useState('');
-  const [cropHeight, setCropHeight] = useState('');
   const [resizeWidth, setResizeWidth] = useState('');
   const [resizeHeight, setResizeHeight] = useState('');
 
   const [activeCropItem, setActiveCropItem] = useState<JobResultEntry | null>(null);
   const [activeResizeItem, setActiveResizeItem] = useState<JobResultEntry | null>(null);
-  const [cropDraft, setCropDraft] = useState<CropDraft>({ width: '', height: '' });
+  const [cropDraft, setCropDraft] = useState<CropDraft>({
+    width: '',
+    height: '',
+    x: '0',
+    y: '0',
+  });
   const [resizeDraft, setResizeDraft] = useState<ResizeDraft>({ width: '', height: '', lock: true });
 
   const [dismissedResultIDs, setDismissedResultIDs] = useState<Set<string>>(new Set());
@@ -54,11 +93,12 @@ export function useQueueController() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollViewportRef = useRef<HTMLDivElement>(null);
   const dragDepthRef = useRef(0);
-  const optionsPayloadRef = useRef<Record<string, unknown> | null>(null);
+  const optionsPayloadRef = useRef<EnqueueOptionsPayload | null>(null);
   const enqueuePathsRef = useRef<((paths: string[]) => Promise<void>) | null>(null);
   const animatedPunchIDsRef = useRef<Set<string>>(new Set());
   const terminalPunchIDsRef = useRef<Set<string>>(new Set());
   const recentEnqueueRef = useRef<{ signature: string; at: number } | null>(null);
+  const cropTransformByJobIDRef = useRef<Map<string, PunchCropTransform>>(new Map());
 
   const processedItems = useMemo(
     () => [...queueState.recent].reverse().filter((item) => !dismissedResultIDs.has(item.id)),
@@ -71,8 +111,6 @@ export function useQueueController() {
     () => ({
       trim_transparent: autoCrop,
       transform: {
-        crop_width: asOptionalDimension(cropWidth),
-        crop_height: asOptionalDimension(cropHeight),
         resize_width: asOptionalDimension(resizeWidth),
         resize_height: asOptionalDimension(resizeHeight),
       },
@@ -86,12 +124,32 @@ export function useQueueController() {
         run_pngout: selectedProfile.runPngout,
       },
     }),
-    [autoCrop, cropHeight, cropWidth, resizeHeight, resizeWidth, selectedProfile],
+    [autoCrop, resizeHeight, resizeWidth, selectedProfile],
   );
 
   useEffect(() => {
     optionsPayloadRef.current = optionsPayload;
   }, [optionsPayload]);
+
+  const enqueueWithOptions = useCallback(
+    async (
+      paths: string[],
+      options: EnqueueOptionsPayload,
+      cropTransform?: PunchCropTransform,
+    ): Promise<JobSnapshot[]> => {
+      const created = await invoke<JobSnapshot[] | null>('enqueue_paths', { paths, options });
+      const createdJobs = Array.isArray(created) ? created : [];
+
+      if (cropTransform) {
+        createdJobs.forEach((job) => {
+          cropTransformByJobIDRef.current.set(job.id, cropTransform);
+        });
+      }
+
+      return createdJobs;
+    },
+    [],
+  );
 
   const enqueuePaths = useCallback(async (paths: string[]) => {
     const normalized = Array.from(new Set(paths.map((path) => path.trim()).filter((path) => path.length > 0)));
@@ -142,17 +200,14 @@ export function useQueueController() {
     recentEnqueueRef.current = { signature, at: now };
 
     try {
-      await invoke('enqueue_paths', {
-        paths: accepted,
-        options: optionsPayloadRef.current ?? optionsPayload,
-      });
+      await enqueueWithOptions(accepted, optionsPayloadRef.current ?? optionsPayload);
     } catch {
       dispatch({
         type: 'QUEUE_ERROR',
         payload: 'Queue start failed. Please try again.',
       });
     }
-  }, [optionsPayload]);
+  }, [enqueueWithOptions, optionsPayload]);
 
   useEffect(() => {
     enqueuePathsRef.current = enqueuePaths;
@@ -178,6 +233,7 @@ export function useQueueController() {
 
       if (TERMINAL_JOB_STATUSES.has(status)) {
         terminalPunchIDsRef.current.add(jobID);
+        cropTransformByJobIDRef.current.delete(jobID);
       }
 
       if (
@@ -186,7 +242,15 @@ export function useQueueController() {
         && !animatedPunchIDsRef.current.has(jobID)
       ) {
         animatedPunchIDsRef.current.add(jobID);
-        setPunchQueue((previous) => [...previous, { id: jobID, inputPath: event.payload.job.input_path }]);
+        const cropTransform = cropTransformByJobIDRef.current.get(jobID);
+        setPunchQueue((previous) => [
+          ...previous,
+          {
+            id: jobID,
+            inputPath: event.payload.job.input_path,
+            cropTransform,
+          },
+        ]);
       }
     })
       .then((off) => {
@@ -329,8 +393,8 @@ export function useQueueController() {
 
   const openItemCropModal = useCallback((item: JobResultEntry) => {
     setActiveCropItem(item);
-    setCropDraft({ width: cropWidth, height: cropHeight });
-  }, [cropHeight, cropWidth]);
+    setCropDraft({ width: '', height: '', x: '0', y: '0' });
+  }, []);
 
   const openItemResizeModal = useCallback((item: JobResultEntry) => {
     setActiveResizeItem(item);
@@ -338,10 +402,53 @@ export function useQueueController() {
   }, [resizeHeight, resizeWidth]);
 
   const applyItemCrop = useCallback(() => {
-    setCropWidth(cropDraft.width);
-    setCropHeight(cropDraft.height);
+    if (!activeCropItem) {
+      setActiveCropItem(null);
+      return;
+    }
+
+    const width = asOptionalDimension(cropDraft.width);
+    const height = asOptionalDimension(cropDraft.height);
+
+    if (!width || !height) {
+      setActiveCropItem(null);
+      return;
+    }
+
+    const cropX = parseNonNegativeCoordinate(cropDraft.x);
+    const cropY = parseNonNegativeCoordinate(cropDraft.y);
+    const cropTransform: PunchCropTransform = {
+      width,
+      height,
+      x: cropX,
+      y: cropY,
+      anchor: 'center',
+    };
+
+    const baseOptions = optionsPayloadRef.current ?? optionsPayload;
+    const options: EnqueueOptionsPayload = {
+      ...baseOptions,
+      // Manual crop should not run auto-trim first, otherwise the source bounds can shift.
+      trim_transparent: false,
+      transform: {
+        ...baseOptions.transform,
+        crop_width: width,
+        crop_height: height,
+        crop_x: cropX,
+        crop_y: cropY,
+        crop_anchor: 'center',
+      },
+    };
+
+    const sourcePath = processingSourcePath(activeCropItem);
     setActiveCropItem(null);
-  }, [cropDraft.height, cropDraft.width]);
+    void enqueueWithOptions([sourcePath], options, cropTransform).catch(() => {
+      dispatch({
+        type: 'QUEUE_ERROR',
+        payload: 'Crop apply failed. Please try again.',
+      });
+    });
+  }, [activeCropItem, cropDraft.height, cropDraft.width, cropDraft.x, cropDraft.y, enqueueWithOptions, optionsPayload]);
 
   const applyItemResize = useCallback(() => {
     setResizeWidth(resizeDraft.width);

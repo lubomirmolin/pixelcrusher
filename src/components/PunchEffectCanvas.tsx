@@ -1,13 +1,65 @@
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import type { PunchCropTransform } from '../features/app/types';
 import { isTauriRuntime, mimeTypeForPath, toAssetUrl } from '../features/app/utils';
 
 type PunchEffectCanvasProps = {
   inputPath: string;
+  cropTransform?: PunchCropTransform;
   onComplete: () => void;
 };
 
-export function PunchEffectCanvas({ inputPath, onComplete }: PunchEffectCanvasProps) {
+type SampleRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+function resolveSampleRect(
+  imageWidth: number,
+  imageHeight: number,
+  cropTransform?: PunchCropTransform,
+): SampleRect {
+  if (!cropTransform) {
+    return {
+      x: 0,
+      y: 0,
+      width: Math.max(1, imageWidth),
+      height: Math.max(1, imageHeight),
+    };
+  }
+
+  const width = Math.min(Math.max(1, cropTransform.width), Math.max(1, imageWidth));
+  const height = Math.min(Math.max(1, cropTransform.height), Math.max(1, imageHeight));
+  const maxX = Math.max(0, imageWidth - width);
+  const maxY = Math.max(0, imageHeight - height);
+
+  if (cropTransform.x != null && cropTransform.y != null) {
+    return {
+      x: Math.min(Math.max(0, cropTransform.x), maxX),
+      y: Math.min(Math.max(0, cropTransform.y), maxY),
+      width,
+      height,
+    };
+  }
+
+  switch (cropTransform.anchor) {
+    case 'top_left':
+      return { x: 0, y: 0, width, height };
+    case 'top_right':
+      return { x: maxX, y: 0, width, height };
+    case 'bottom_left':
+      return { x: 0, y: maxY, width, height };
+    case 'bottom_right':
+      return { x: maxX, y: maxY, width, height };
+    case 'center':
+    default:
+      return { x: Math.floor(maxX / 2), y: Math.floor(maxY / 2), width, height };
+  }
+}
+
+export function PunchEffectCanvas({ inputPath, cropTransform, onComplete }: PunchEffectCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [resolvedSrc, setResolvedSrc] = useState<string | null>(null);
 
@@ -99,8 +151,12 @@ export function PunchEffectCanvas({ inputPath, onComplete }: PunchEffectCanvasPr
       const ch = canvas.height;
 
       const maxImageSize = 160;
-      const ratio = hasSourceImage && targetImg.naturalWidth > 0 && targetImg.naturalHeight > 0
-        ? targetImg.naturalWidth / targetImg.naturalHeight
+      const sampleRect = hasSourceImage && targetImg.naturalWidth > 0 && targetImg.naturalHeight > 0
+        ? resolveSampleRect(targetImg.naturalWidth, targetImg.naturalHeight, cropTransform)
+        : { x: 0, y: 0, width: 1, height: 1 };
+
+      const ratio = hasSourceImage
+        ? sampleRect.width / sampleRect.height
         : 1;
 
       const imgW = ratio >= 1 ? maxImageSize : maxImageSize * ratio;
@@ -125,7 +181,17 @@ export function PunchEffectCanvas({ inputPath, onComplete }: PunchEffectCanvasPr
 
       if (samplingCtx && hasSourceImage) {
         samplingCtx.clearRect(0, 0, samplingCanvas.width, samplingCanvas.height);
-        samplingCtx.drawImage(targetImg, 0, 0, samplingCanvas.width, samplingCanvas.height);
+        samplingCtx.drawImage(
+          targetImg,
+          sampleRect.x,
+          sampleRect.y,
+          sampleRect.width,
+          sampleRect.height,
+          0,
+          0,
+          samplingCanvas.width,
+          samplingCanvas.height,
+        );
       }
 
       const sampleColor = (block: Block): string => {
@@ -228,10 +294,10 @@ export function PunchEffectCanvas({ inputPath, onComplete }: PunchEffectCanvasPr
             if (hasSourceImage) {
               offCtx.drawImage(
                 targetImg,
-                0,
-                0,
-                targetImg.naturalWidth,
-                targetImg.naturalHeight,
+                sampleRect.x,
+                sampleRect.y,
+                sampleRect.width,
+                sampleRect.height,
                 0,
                 0,
                 scaledW,
@@ -350,7 +416,7 @@ export function PunchEffectCanvas({ inputPath, onComplete }: PunchEffectCanvasPr
         window.cancelAnimationFrame(animationId);
       }
     };
-  }, [onComplete, resolvedSrc]);
+  }, [cropTransform, onComplete, resolvedSrc]);
 
   return <canvas ref={canvasRef} width={320} height={420} className="h-[280px] w-auto object-contain drop-shadow-2xl" />;
 }

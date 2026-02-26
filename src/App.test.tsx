@@ -143,6 +143,59 @@ describe('App Swift-style UI', () => {
     });
   });
 
+  it('applies item crop as one-off enqueue against the latest output path', async () => {
+    configureInvoke({
+      recent_results: [recentResult],
+      enqueue_paths: [
+        {
+          id: 'job-2',
+          input_path: recentResult.output_path,
+          status: 'queued',
+          progress: 0,
+          message: 'Queued',
+        },
+      ],
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByTestId('list-state');
+    await user.click(screen.getByTitle('Crop Image'));
+    await user.type(screen.getByLabelText('Width'), '120');
+    await user.type(screen.getByLabelText('Height'), '80');
+    await user.clear(screen.getByLabelText('X'));
+    await user.type(screen.getByLabelText('X'), '12');
+    await user.clear(screen.getByLabelText('Y'));
+    await user.type(screen.getByLabelText('Y'), '18');
+    await user.click(screen.getByRole('button', { name: 'Apply' }));
+
+    await waitFor(() => {
+      const enqueueCalls = invokeMock.mock.calls.filter(([command]) => command === 'enqueue_paths');
+      expect(enqueueCalls.length).toBeGreaterThan(0);
+
+      const payload = enqueueCalls.at(-1)?.[1] as {
+        paths?: string[];
+        options?: {
+          trim_transparent?: boolean;
+          transform?: {
+            crop_width?: number;
+            crop_height?: number;
+            crop_x?: number;
+            crop_y?: number;
+          };
+        };
+      };
+
+      expect(payload.paths).toEqual([recentResult.output_path]);
+      expect(payload.options?.trim_transparent).toBe(false);
+      expect(payload.options?.transform?.crop_width).toBe(120);
+      expect(payload.options?.transform?.crop_height).toBe(80);
+      expect(payload.options?.transform?.crop_x).toBe(12);
+      expect(payload.options?.transform?.crop_y).toBe(18);
+    });
+  });
+
   it('opens updates modal and fetches latest release', async () => {
     const user = userEvent.setup();
     render(<App />);

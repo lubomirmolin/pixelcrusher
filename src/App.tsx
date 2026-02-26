@@ -171,6 +171,7 @@ function App() {
       )}
 
       <CropModal
+        key={activeCropItem?.id ?? 'crop-modal'}
         activeItem={activeCropItem}
         draft={cropDraft}
         onDraftChange={setCropDraft}

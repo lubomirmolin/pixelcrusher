@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import type { RefObject } from 'react';
 import { ArrowRight, CheckCircle2, Crop, Maximize2 } from 'lucide-react';
 import { formatBytes, type JobResultEntry } from '../state/queueState';
@@ -14,6 +15,55 @@ type ProcessedItemsPanelProps = {
   onClearProcessedItems: () => void;
   onPunchComplete: () => void;
 };
+
+const RESOLUTION_CACHE = new Map<string, string>();
+
+function ItemResolution({ path }: { path: string }) {
+  const [resolvedLabel, setResolvedLabel] = useState<string | null>(() => RESOLUTION_CACHE.get(path) ?? null);
+  const [retryTick, setRetryTick] = useState(0);
+  const label = path ? RESOLUTION_CACHE.get(path) ?? resolvedLabel ?? '—' : '—';
+
+  useEffect(() => {
+    if (!path || RESOLUTION_CACHE.has(path)) {
+      return;
+    }
+
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    const image = new Image();
+    image.onload = () => {
+      if (cancelled) {
+        return;
+      }
+      const next = `${Math.max(1, image.naturalWidth)}×${Math.max(1, image.naturalHeight)}`;
+      RESOLUTION_CACHE.set(path, next);
+      setResolvedLabel(next);
+    };
+    image.onerror = () => {
+      if (cancelled) {
+        return;
+      }
+      // Some files are briefly unreadable just after completion; retry a few times.
+      if (retryTick < 3) {
+        retryTimer = setTimeout(() => {
+          setRetryTick((value) => value + 1);
+        }, 250 * (retryTick + 1));
+      }
+    };
+    image.src = toAssetUrl(path);
+
+    return () => {
+      cancelled = true;
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+      }
+    };
+  }, [path, retryTick]);
+
+  return (
+    <span className="ml-3 min-w-[100px] text-right font-mono text-[12px] text-gray-500">{label}</span>
+  );
+}
 
 export function ProcessedItemsPanel({
   processedItems,
@@ -47,7 +97,7 @@ export function ProcessedItemsPanel({
               return (
                 <div key={item.id} className="p-3 flex items-center group bg-white rounded-lg shadow-sm border border-gray-200 animate-[slideIn_0.3s_ease-out]">
                   <div className="w-14 h-14 overflow-hidden flex-shrink-0 relative rounded-md bg-gray-100">
-                    {previewSrc ? <img src={previewSrc} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center font-bold text-gray-400">{basename(item.input_path).charAt(0)}</div>}
+                    {previewSrc ? <img src={previewSrc} alt="" className="w-full h-full object-contain" /> : <div className="w-full h-full flex items-center justify-center font-bold text-gray-400">{basename(item.input_path).charAt(0)}</div>}
                   </div>
 
                   <div className="ml-4 flex-1 min-w-0">
@@ -67,6 +117,7 @@ export function ProcessedItemsPanel({
                   </div>
 
                   <div className="ml-4 flex items-center space-x-2">
+                    <ItemResolution path={previewPath} />
                     <button
                       onClick={() => onOpenItemCrop(item)}
                       className="p-2 transition-colors bg-transparent rounded hover:bg-black/5 text-gray-600 tooltip-trigger"
@@ -102,6 +153,7 @@ export function ProcessedItemsPanel({
           <div className="w-[360px] h-[300px] rounded-2xl bg-transparent flex items-end justify-center overflow-hidden">
             <PunchEffectCanvas
               inputPath={activePunch.inputPath}
+              cropTransform={activePunch.cropTransform}
               onComplete={onPunchComplete}
             />
           </div>
