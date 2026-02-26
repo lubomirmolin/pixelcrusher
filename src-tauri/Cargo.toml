@@ -31,3 +31,4 @@ pixelcrusher-core = { path = "../crates/pixelcrusher-core" }
 tempfile = "3"
 
 
+
