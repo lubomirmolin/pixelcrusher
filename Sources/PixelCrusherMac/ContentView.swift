@@ -305,7 +305,7 @@ struct ContentView: View {
 
     private func punchSection(for session: PunchSession) -> some View {
         return VStack(spacing: 10) {
-            PunchEffectView(inputURL: session.inputURL) {
+            PunchEffectView(inputURL: session.inputURL, cropTransform: session.cropTransform) {
                 guard punchSession?.id == session.id else {
                     return
                 }
@@ -577,7 +577,11 @@ struct ContentView: View {
             return
         }
 
-        punchSession = PunchSession(id: activeID, inputURL: result.inputURL)
+        punchSession = PunchSession(
+            id: activeID,
+            inputURL: processingSourceURL(for: result),
+            cropTransform: model.punchCropTransform(for: activeID)
+        )
     }
 
     private func cropSheet(for result: ProcessingResult) -> some View {

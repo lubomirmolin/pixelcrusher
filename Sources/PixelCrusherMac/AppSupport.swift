@@ -44,6 +44,14 @@ struct ProcessingResult: Identifiable {
     }
 }
 
+struct PunchCropTransform: Equatable {
+    let width: Int
+    let height: Int
+    let x: Int?
+    let y: Int?
+    let anchor: CropAnchor
+}
+
 enum DropValidationState {
     case idle
     case supported

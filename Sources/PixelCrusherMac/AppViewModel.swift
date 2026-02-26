@@ -320,6 +320,21 @@ final class AppViewModel: ObservableObject {
         enqueueExternal(urls: [sourceURL], optionsOverride: options)
     }
 
+    func punchCropTransform(for id: UUID) -> PunchCropTransform? {
+        guard let options = optionsOverrideByID[id],
+              let size = options.fixedCropSize else {
+            return nil
+        }
+
+        return PunchCropTransform(
+            width: size.width,
+            height: size.height,
+            x: options.fixedCropOrigin?.x,
+            y: options.fixedCropOrigin?.y,
+            anchor: options.fixedCropAnchor
+        )
+    }
+
     func cancelQueuedJobs() {
         let cancelledIDs = queueStateMachine.cancelQueuedJobs()
 

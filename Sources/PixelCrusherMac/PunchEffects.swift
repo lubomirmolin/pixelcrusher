@@ -3,10 +3,12 @@ import AppKit
 import Foundation
 import ImageIO
 import CoreImage
+import PixelCrusherMacCore
 
 struct PunchSession: Equatable {
     let id: UUID
     let inputURL: URL
+    let cropTransform: PunchCropTransform?
 }
 
 struct ResultThumbnail: View {
@@ -39,6 +41,7 @@ struct ResultThumbnail: View {
 
 struct PunchEffectView: View {
     let inputURL: URL
+    let cropTransform: PunchCropTransform?
     let onComplete: () -> Void
 
     @State private var animator: PunchAnimator?
@@ -62,7 +65,7 @@ struct PunchEffectView: View {
             }
         }
         .onAppear {
-            animator = PunchAnimator(inputURL: inputURL)
+            animator = PunchAnimator(inputURL: inputURL, cropTransform: cropTransform)
             didFinish = false
         }
     }
@@ -98,8 +101,8 @@ private final class PunchAnimator {
     private var phase = 0
     private var completed = false
 
-    init(inputURL: URL) {
-        self.sampler = PunchColorSampler(fileURL: inputURL)
+    init(inputURL: URL, cropTransform: PunchCropTransform?) {
+        self.sampler = PunchColorSampler(fileURL: inputURL, cropTransform: cropTransform)
         self.fistImage = Self.loadFistImage()
         let maxDimension: CGFloat = 160
         let aspectRatio = self.sampler?.aspectRatio ?? 1
@@ -383,13 +386,17 @@ private final class PunchAnimator {
 private final class PunchColorSampler {
     private let width: Int
     private let height: Int
+    private let sampleOriginX: Int
+    private let sampleOriginY: Int
+    private let sampleWidth: Int
+    private let sampleHeight: Int
     private let rgba: [UInt8]
     var aspectRatio: CGFloat {
-        guard height > 0 else { return 1 }
-        return CGFloat(width) / CGFloat(height)
+        guard sampleHeight > 0 else { return 1 }
+        return CGFloat(sampleWidth) / CGFloat(sampleHeight)
     }
 
-    init?(fileURL: URL) {
+    init?(fileURL: URL, cropTransform: PunchCropTransform?) {
         guard let cgImage = PixelCrusherImageLoader.orientedCGImage(from: fileURL) else {
             return nil
         }
@@ -426,14 +433,24 @@ private final class PunchColorSampler {
         self.width = width
         self.height = height
         self.rgba = storage
+
+        let sampleRect = Self.resolvedSampleRect(
+            imageWidth: width,
+            imageHeight: height,
+            cropTransform: cropTransform
+        )
+        self.sampleOriginX = sampleRect.origin.x
+        self.sampleOriginY = sampleRect.origin.y
+        self.sampleWidth = sampleRect.size.width
+        self.sampleHeight = sampleRect.size.height
     }
 
     func color(atNormalizedX x: CGFloat, y: CGFloat) -> Color {
         let clampedX = min(max(x, 0), 1)
         let clampedY = min(max(y, 0), 1)
 
-        let px = Int(clampedX * CGFloat(max(width - 1, 0)))
-        let py = Int(clampedY * CGFloat(max(height - 1, 0)))
+        let px = sampleOriginX + Int(clampedX * CGFloat(max(sampleWidth - 1, 0)))
+        let py = sampleOriginY + Int(clampedY * CGFloat(max(sampleHeight - 1, 0)))
         let index = ((py * width) + px) * 4
 
         guard index >= 0, index + 3 < rgba.count else {
@@ -445,6 +462,55 @@ private final class PunchColorSampler {
             green: Double(rgba[index + 1]) / 255.0,
             blue: Double(rgba[index + 2]) / 255.0,
             opacity: Double(rgba[index + 3]) / 255.0
+        )
+    }
+
+    private static func resolvedSampleRect(
+        imageWidth: Int,
+        imageHeight: Int,
+        cropTransform: PunchCropTransform?
+    ) -> (origin: (x: Int, y: Int), size: (width: Int, height: Int)) {
+        guard let cropTransform else {
+            return (
+                origin: (x: 0, y: 0),
+                size: (width: max(1, imageWidth), height: max(1, imageHeight))
+            )
+        }
+
+        let width = min(max(1, cropTransform.width), max(1, imageWidth))
+        let height = min(max(1, cropTransform.height), max(1, imageHeight))
+        let maxX = max(0, imageWidth - width)
+        let maxY = max(0, imageHeight - height)
+
+        let originX: Int
+        let originY: Int
+
+        if let x = cropTransform.x, let y = cropTransform.y {
+            originX = min(max(0, x), maxX)
+            originY = min(max(0, y), maxY)
+        } else {
+            switch cropTransform.anchor {
+            case .center:
+                originX = maxX / 2
+                originY = maxY / 2
+            case .topLeft:
+                originX = 0
+                originY = 0
+            case .topRight:
+                originX = maxX
+                originY = 0
+            case .bottomLeft:
+                originX = 0
+                originY = maxY
+            case .bottomRight:
+                originX = maxX
+                originY = maxY
+            }
+        }
+
+        return (
+            origin: (x: originX, y: originY),
+            size: (width: width, height: height)
         )
     }
 }
