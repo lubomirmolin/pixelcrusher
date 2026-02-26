@@ -304,7 +304,7 @@ struct ContentView: View {
     }
 
     private func punchSection(for session: PunchSession) -> some View {
-        VStack(spacing: 10) {
+        return VStack(spacing: 10) {
             PunchEffectView(inputURL: session.inputURL) {
                 guard punchSession?.id == session.id else {
                     return
@@ -323,10 +323,10 @@ struct ContentView: View {
     }
 
     private func resultRow(for result: ProcessingResult) -> some View {
-        let thumbnailURL = result.outputURL ?? result.inputURL
+        let previewURL = processingSourceURL(for: result)
 
         return HStack(alignment: .center, spacing: 14) {
-            ResultThumbnail(url: thumbnailURL)
+            ResultThumbnail(url: previewURL)
 
             VStack(alignment: .leading, spacing: 7) {
                 Text(result.inputURL.lastPathComponent)
@@ -360,13 +360,18 @@ struct ContentView: View {
 
             Spacer(minLength: 8)
 
+            Text(resolutionText(for: result))
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.65) : .secondary)
+                .frame(minWidth: 110, alignment: .trailing)
+
             HStack(spacing: 8) {
                 actionGlyphButton(symbol: "crop", help: "Crop image") {
                     cropTarget = result
-                    cropDraftWidth = model.fixedCropWidth
-                    cropDraftHeight = model.fixedCropHeight
-                    cropDraftX = model.fixedCropX
-                    cropDraftY = model.fixedCropY
+                    cropDraftWidth = ""
+                    cropDraftHeight = ""
+                    cropDraftX = "0"
+                    cropDraftY = "0"
                 }
 
                 actionGlyphButton(symbol: "arrow.up.left.and.arrow.down.right", help: "Resize image") {
@@ -547,6 +552,18 @@ struct ContentView: View {
         return formatter.string(fromByteCount: bytes)
     }
 
+    private func resolutionText(for result: ProcessingResult) -> String {
+        let url = processingSourceURL(for: result)
+        guard let size = PixelCrusherImageLoader.orientedPixelSize(from: url) else {
+            return "—"
+        }
+        return "\(Int(size.width.rounded()))×\(Int(size.height.rounded()))"
+    }
+
+    private func processingSourceURL(for result: ProcessingResult) -> URL {
+        result.outputURL ?? result.inputURL
+    }
+
     private func syncPunchSession() {
         guard let activeID = model.activeItemID else {
             return
@@ -564,8 +581,10 @@ struct ContentView: View {
     }
 
     private func cropSheet(for result: ProcessingResult) -> some View {
-        CropEditorSheet(
-            result: result,
+        let sourceURL = processingSourceURL(for: result)
+
+        return CropEditorSheet(
+            sourceURL: sourceURL,
             widthText: $cropDraftWidth,
             heightText: $cropDraftHeight,
             xText: $cropDraftX,
@@ -574,20 +593,18 @@ struct ContentView: View {
                 cropTarget = nil
             },
             onApply: {
-                model.fixedCropWidth = cropDraftWidth
-                model.fixedCropHeight = cropDraftHeight
-                model.fixedCropX = cropDraftX
-                model.fixedCropY = cropDraftY
-                model.cropAnchor = .center
                 if let width = Int(cropDraftWidth),
                    let height = Int(cropDraftHeight),
                    width > 0,
                    height > 0 {
-                    model.fixedCropEnabled = true
-                } else {
-                    model.fixedCropEnabled = false
+                    model.enqueueCroppedImage(
+                        sourceURL: sourceURL,
+                        width: width,
+                        height: height,
+                        x: Int(cropDraftX) ?? 0,
+                        y: Int(cropDraftY) ?? 0
+                    )
                 }
-                model.enqueueExternal(urls: [result.inputURL])
                 cropTarget = nil
             }
         )
@@ -630,7 +647,7 @@ struct ContentView: View {
         var height = Int(resizeDraftHeight)
 
         if resizeDraftLock,
-           let sourceSize = PixelCrusherImageLoader.orientedPixelSize(from: result.inputURL) {
+           let sourceSize = PixelCrusherImageLoader.orientedPixelSize(from: processingSourceURL(for: result)) {
             if width == nil, let knownHeight = height, knownHeight > 0 {
                 let computedWidth = max(1, Int((CGFloat(knownHeight) * sourceSize.width / sourceSize.height).rounded()))
                 width = computedWidth

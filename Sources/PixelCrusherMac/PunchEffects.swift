@@ -13,31 +13,27 @@ struct ResultThumbnail: View {
     let url: URL
 
     var body: some View {
-        ZStack {
-            Color.secondary.opacity(0.08)
-
-            if let image = PixelCrusherImageLoader.orientedNSImage(from: url) {
-                Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .padding(4)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-            } else {
-                ZStack {
-                    Color.secondary.opacity(0.15)
-                    Image(systemName: "photo")
-                        .foregroundStyle(.secondary)
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(Color.secondary.opacity(0.08))
+            .overlay {
+                if let image = PixelCrusherImageLoader.orientedNSImage(from: url) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .padding(4)
+                } else {
+                    ZStack {
+                        Color.secondary.opacity(0.15)
+                        Image(systemName: "photo")
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-        }
-        .frame(width: 74, height: 74)
-        .clipped()
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.black.opacity(0.12), lineWidth: 1)
-        )
+            .frame(width: 74, height: 74)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color.black.opacity(0.12), lineWidth: 1)
+            )
     }
 }
 
@@ -469,7 +465,8 @@ enum PixelCrusherImageLoader {
     }
 
     static func orientedCGImage(from url: URL) -> CGImage? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+        guard let data = try? Data(contentsOf: url),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             return nil
         }

@@ -151,6 +151,7 @@ final class AppViewModel: ObservableObject {
 
     private var queueStateMachine = ProcessingQueueStateMachine()
     private var resultIndexByID: [UUID: Int] = [:]
+    private var optionsOverrideByID: [UUID: ImageProcessingOptions] = [:]
     private var queueWorkerTask: Task<Void, Never>?
     private var currentJobTasks: [UUID: Task<ImageProcessingReport, Error>] = [:]
     private var stopAfterCurrent = false
@@ -303,16 +304,27 @@ final class AppViewModel: ObservableObject {
         enqueueInput(url: folder)
     }
 
-    func enqueueExternal(urls: [URL]) {
+    func enqueueExternal(urls: [URL], optionsOverride: ImageProcessingOptions? = nil) {
         for url in urls {
-            enqueueInput(url: url)
+            enqueueInput(url: url, optionsOverride: optionsOverride)
         }
+    }
+
+    func enqueueCroppedImage(sourceURL: URL, width: Int, height: Int, x: Int, y: Int) {
+        guard let cropSize = try? CropSize(width: width, height: height) else {
+            return
+        }
+
+        let cropOrigin = try? CropOrigin(x: max(0, x), y: max(0, y))
+        let options = currentOptions(manualCrop: (size: cropSize, origin: cropOrigin))
+        enqueueExternal(urls: [sourceURL], optionsOverride: options)
     }
 
     func cancelQueuedJobs() {
         let cancelledIDs = queueStateMachine.cancelQueuedJobs()
 
         for id in cancelledIDs {
+            optionsOverrideByID[id] = nil
             guard let index = resultIndexByID[id] else { continue }
             results[index].success = false
             results[index].state = .failed
@@ -349,7 +361,7 @@ final class AppViewModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([output])
     }
 
-    private func enqueueInput(url: URL) {
+    private func enqueueInput(url: URL, optionsOverride: ImageProcessingOptions? = nil) {
         var isDirectory = ObjCBool(false)
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
             appendImmediateFailure(inputURL: url, message: "Input path does not exist")
@@ -367,7 +379,7 @@ final class AppViewModel: ObservableObject {
                     Self.collectSupportedFiles(in: folderURL)
                 }.value
                 for file in files {
-                    enqueueFile(file)
+                    enqueueFile(file, optionsOverride: optionsOverride)
                 }
             }
             return
@@ -377,11 +389,14 @@ final class AppViewModel: ObservableObject {
             return
         }
 
-        enqueueFile(url)
+        enqueueFile(url, optionsOverride: optionsOverride)
     }
 
-    private func enqueueFile(_ fileURL: URL) {
+    private func enqueueFile(_ fileURL: URL, optionsOverride: ImageProcessingOptions? = nil) {
         let queuedItem = queueStateMachine.enqueue(inputURL: fileURL)
+        if let optionsOverride {
+            optionsOverrideByID[queuedItem.id] = optionsOverride
+        }
         let result = ProcessingResult(
             id: queuedItem.id,
             inputURL: fileURL,
@@ -490,7 +505,7 @@ final class AppViewModel: ObservableObject {
             }
 
             let inputURL = results[index].inputURL
-            let options = currentOptions()
+            let options = optionsOverrideByID[nextItem.id] ?? currentOptions()
             let processor = self.processor
 
             let statusBridge: @Sendable (ProcessingStatusUpdate) -> Void = { [weak self] update in
@@ -545,6 +560,7 @@ final class AppViewModel: ObservableObject {
 
     private func completeJob(id: UUID, report: ImageProcessingReport) {
         try? queueStateMachine.transition(id: id, to: .done)
+        optionsOverrideByID[id] = nil
 
         guard let index = resultIndexByID[id] else { return }
         results[index].outputURL = report.outputURL
@@ -559,6 +575,7 @@ final class AppViewModel: ObservableObject {
 
     private func failJob(id: UUID, message: String) {
         try? queueStateMachine.transition(id: id, to: .failed)
+        optionsOverrideByID[id] = nil
 
         guard let index = resultIndexByID[id] else { return }
         results[index].success = false
@@ -612,28 +629,11 @@ final class AppViewModel: ObservableObject {
         return size.int64Value
     }
 
-    private func currentOptions() -> ImageProcessingOptions {
-        let fixedCropSize: CropSize?
-        let fixedCropOrigin: CropOrigin?
-
-        if fixedCropEnabled,
-           let width = Int(fixedCropWidth),
-           let height = Int(fixedCropHeight),
-           width > 0,
-           height > 0 {
-            fixedCropSize = try? CropSize(width: width, height: height)
-            if let x = Int(fixedCropX),
-               let y = Int(fixedCropY),
-               x >= 0,
-               y >= 0 {
-                fixedCropOrigin = try? CropOrigin(x: x, y: y)
-            } else {
-                fixedCropOrigin = nil
-            }
-        } else {
-            fixedCropSize = nil
-            fixedCropOrigin = nil
-        }
+    private func currentOptions(
+        manualCrop: (size: CropSize, origin: CropOrigin?)? = nil
+    ) -> ImageProcessingOptions {
+        let fixedCropSize = manualCrop?.size
+        let fixedCropOrigin = manualCrop?.origin
 
         let fixedResizeSize: CropSize?
         if fixedResizeEnabled,

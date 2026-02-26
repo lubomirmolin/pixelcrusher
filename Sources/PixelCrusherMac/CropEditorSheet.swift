@@ -3,7 +3,7 @@ import AppKit
 import PixelCrusherMacCore
 
 struct CropEditorSheet: View {
-    let result: ProcessingResult
+    let sourceURL: URL
     @Binding var widthText: String
     @Binding var heightText: String
     @Binding var xText: String
@@ -13,7 +13,7 @@ struct CropEditorSheet: View {
 
     @State private var previewImage: NSImage?
     @State private var sourceSize: CGSize?
-    @State private var selectedPreset: CropAspectPreset = .free
+    @State private var selectedPreset: CropAspectPreset = .original
     @State private var didLoadImage = false
 
     private var resolvedSourceSize: CGSize {
@@ -73,7 +73,7 @@ struct CropEditorSheet: View {
                 Text("Crop image")
                     .font(.title3.weight(.semibold))
 
-                Text(result.inputURL.lastPathComponent)
+                Text(sourceURL.lastPathComponent)
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -85,7 +85,7 @@ struct CropEditorSheet: View {
             Spacer()
 
             Button("Reset") {
-                selectedPreset = .free
+                selectedPreset = .original
                 let source = resolvedSourceSize
                 updateCropRect(CGRect(origin: .zero, size: source))
             }
@@ -196,12 +196,12 @@ struct CropEditorSheet: View {
         }
 
         didLoadImage = true
-        sourceSize = PixelCrusherImageLoader.orientedPixelSize(from: result.inputURL)
-        previewImage = PixelCrusherImageLoader.orientedNSImage(from: result.inputURL)
+        sourceSize = PixelCrusherImageLoader.orientedPixelSize(from: sourceURL)
+        previewImage = PixelCrusherImageLoader.orientedNSImage(from: sourceURL)
 
-        let normalized = currentCropRect
-        updateCropRect(normalized)
-        selectedPreset = CropAspectPreset.bestMatch(for: normalized.size, sourceSize: resolvedSourceSize)
+        let source = resolvedSourceSize
+        updateCropRect(CGRect(origin: .zero, size: source))
+        selectedPreset = .original
     }
 
     private func updateCropRect(_ rect: CGRect) {
