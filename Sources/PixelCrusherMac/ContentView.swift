@@ -493,29 +493,7 @@ struct ContentView: View {
     }
 
     private func applyProfile(_ profile: CompressionProfile) {
-        switch profile {
-        case .balanced:
-            model.jpegQualityPercent = 82
-            model.pngLossyEnabled = true
-            model.pngLossyQualityMin = 60
-            model.pngLossyQualityMax = 90
-            model.pngUsePNGCrush = true
-            model.pngUseZopfli = false
-        case .high:
-            model.jpegQualityPercent = 92
-            model.pngLossyEnabled = false
-            model.pngLossyQualityMin = 75
-            model.pngLossyQualityMax = 98
-            model.pngUsePNGCrush = true
-            model.pngUseZopfli = true
-        case .smallest:
-            model.jpegQualityPercent = 70
-            model.pngLossyEnabled = true
-            model.pngLossyQualityMin = 45
-            model.pngLossyQualityMax = 75
-            model.pngUsePNGCrush = true
-            model.pngUseZopfli = true
-        }
+        model.applyCompressionProfile(profile)
     }
 
     private func sizeDelta(for result: ProcessingResult) -> (text: String, color: Color)? {
@@ -539,17 +517,21 @@ struct ContentView: View {
         return ("0%", .secondary)
     }
 
-    private func formatBytes(_ bytes: Int64?) -> String {
-        guard let bytes, bytes > 0 else {
-            return "—"
-        }
-
+    private static let byteCountFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useKB, .useMB, .useGB]
         formatter.countStyle = .file
         formatter.includesUnit = true
         formatter.isAdaptive = true
-        return formatter.string(fromByteCount: bytes)
+        return formatter
+    }()
+
+    private func formatBytes(_ bytes: Int64?) -> String {
+        guard let bytes, bytes > 0 else {
+            return "—"
+        }
+
+        return Self.byteCountFormatter.string(fromByteCount: bytes)
     }
 
     private func resolutionText(for result: ProcessingResult) -> String {
@@ -647,23 +629,28 @@ struct ContentView: View {
     }
 
     private func applyResizeDraft(for result: ProcessingResult) {
-        var width = Int(resizeDraftWidth)
-        var height = Int(resizeDraftHeight)
+        let parsedWidth = Int(resizeDraftWidth)
+        let parsedHeight = Int(resizeDraftHeight)
 
-        if resizeDraftLock,
-           let sourceSize = PixelCrusherImageLoader.orientedPixelSize(from: processingSourceURL(for: result)) {
-            if width == nil, let knownHeight = height, knownHeight > 0 {
-                let computedWidth = max(1, Int((CGFloat(knownHeight) * sourceSize.width / sourceSize.height).rounded()))
-                width = computedWidth
-                resizeDraftWidth = String(computedWidth)
-            } else if height == nil, let knownWidth = width, knownWidth > 0 {
-                let computedHeight = max(1, Int((CGFloat(knownWidth) * sourceSize.height / sourceSize.width).rounded()))
-                height = computedHeight
-                resizeDraftHeight = String(computedHeight)
-            }
+        let resolved = AspectRatioResize.resolve(
+            width: parsedWidth,
+            height: parsedHeight,
+            lockAspectRatio: resizeDraftLock,
+            sourceSize: PixelCrusherImageLoader.orientedPixelSize(from: processingSourceURL(for: result))
+        )
+
+        if parsedWidth == nil, let computedWidth = resolved.width {
+            resizeDraftWidth = String(computedWidth)
         }
 
-        guard let width, let height, width > 0, height > 0 else {
+        if parsedHeight == nil, let computedHeight = resolved.height {
+            resizeDraftHeight = String(computedHeight)
+        }
+
+        guard let width = resolved.width,
+              let height = resolved.height,
+              width > 0,
+              height > 0 else {
             model.fixedResizeEnabled = false
             resizeTarget = nil
             return

@@ -102,7 +102,7 @@ public final class ImageProcessor: @unchecked Sendable {
     }
 
     private static func isSupported(inputURL: URL) -> Bool {
-        ["png", "jpg", "jpeg", "svg", "gif"].contains(inputURL.pathExtension.lowercased())
+        SupportedAssetFormats.isSupportedImageURL(inputURL)
     }
 }
 

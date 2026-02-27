@@ -38,8 +38,7 @@ final class AppViewModel: ObservableObject {
     private let defaults: UserDefaults
     private let backendClient: PixelCrusherBackendClient
     private let processor: ImageProcessor
-    nonisolated static let supportedImageExtensions: Set<String> = ["png", "jpg", "jpeg", "svg", "gif"]
-    nonisolated static let supportedFormatsLabel = "PNG/JPG/JPEG/SVG/GIF"
+    nonisolated static let supportedFormatsLabel = SupportedAssetFormats.imageFormatsLabel
     nonisolated static let supportedImageUTTypes: [UTType] = [
         .png,
         .jpeg,
@@ -211,6 +210,16 @@ final class AppViewModel: ObservableObject {
         refreshToolAvailability()
     }
 
+    func applyCompressionProfile(_ profile: CompressionProfile) {
+        let settings = profile.settings
+        jpegQualityPercent = settings.jpegQualityPercent
+        pngLossyEnabled = settings.pngLossyEnabled
+        pngLossyQualityMin = settings.pngLossyQualityMin
+        pngLossyQualityMax = settings.pngLossyQualityMax
+        pngUsePNGCrush = settings.pngUsePNGCrush
+        pngUseZopfli = settings.pngUseZopfli
+    }
+
     func refreshToolAvailability() {
         let backend = backendClient
         Task {
@@ -253,22 +262,12 @@ final class AppViewModel: ObservableObject {
         for provider in matching {
             provider.loadItem(forTypeIdentifier: fileURLType, options: nil) { [weak self] item, error in
                 if let error {
-                    Task { @MainActor [weak self] in
-                        self?.appendImmediateFailure(
-                            inputURL: URL(fileURLWithPath: "unknown"),
-                            message: "Drop error: \(error.localizedDescription)"
-                        )
-                    }
+                    Self.enqueueDropFailure(on: self, message: "Drop error: \(error.localizedDescription)")
                     return
                 }
 
                 guard let droppedURL = Self.extractFileURL(from: item) else {
-                    Task { @MainActor [weak self] in
-                        self?.appendImmediateFailure(
-                            inputURL: URL(fileURLWithPath: "unknown"),
-                            message: "Could not decode dropped file URL"
-                        )
-                    }
+                    Self.enqueueDropFailure(on: self, message: "Could not decode dropped file URL")
                     return
                 }
 
@@ -691,6 +690,15 @@ final class AppViewModel: ObservableObject {
         )
     }
 
+    nonisolated private static func enqueueDropFailure(on model: AppViewModel?, message: String) {
+        Task { @MainActor [weak model] in
+            model?.appendImmediateFailure(
+                inputURL: URL(fileURLWithPath: "unknown"),
+                message: message
+            )
+        }
+    }
+
     nonisolated private static func collectSupportedFiles(in folderURL: URL) -> [URL] {
         guard let enumerator = FileManager.default.enumerator(
             at: folderURL,
@@ -710,7 +718,7 @@ final class AppViewModel: ObservableObject {
     }
 
     nonisolated private static func isSupportedFile(_ url: URL) -> Bool {
-        supportedImageExtensions.contains(url.pathExtension.lowercased())
+        SupportedAssetFormats.isSupportedImageURL(url)
     }
 
     nonisolated private static func extractFileURL(from item: NSSecureCoding?) -> URL? {

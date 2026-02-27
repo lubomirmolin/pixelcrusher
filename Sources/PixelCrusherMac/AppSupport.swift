@@ -58,6 +58,15 @@ enum DropValidationState {
     case unsupported
 }
 
+struct CompressionProfileSettings {
+    let jpegQualityPercent: Double
+    let pngLossyEnabled: Bool
+    let pngLossyQualityMin: Double
+    let pngLossyQualityMax: Double
+    let pngUsePNGCrush: Bool
+    let pngUseZopfli: Bool
+}
+
 enum CompressionProfile: CaseIterable {
     case balanced
     case high
@@ -71,6 +80,38 @@ enum CompressionProfile: CaseIterable {
             return "High Quality"
         case .smallest:
             return "Smallest Size"
+        }
+    }
+
+    var settings: CompressionProfileSettings {
+        switch self {
+        case .balanced:
+            return CompressionProfileSettings(
+                jpegQualityPercent: 82,
+                pngLossyEnabled: true,
+                pngLossyQualityMin: 60,
+                pngLossyQualityMax: 90,
+                pngUsePNGCrush: true,
+                pngUseZopfli: false
+            )
+        case .high:
+            return CompressionProfileSettings(
+                jpegQualityPercent: 92,
+                pngLossyEnabled: false,
+                pngLossyQualityMin: 75,
+                pngLossyQualityMax: 98,
+                pngUsePNGCrush: true,
+                pngUseZopfli: true
+            )
+        case .smallest:
+            return CompressionProfileSettings(
+                jpegQualityPercent: 70,
+                pngLossyEnabled: true,
+                pngLossyQualityMin: 45,
+                pngLossyQualityMax: 75,
+                pngUsePNGCrush: true,
+                pngUseZopfli: true
+            )
         }
     }
 }
