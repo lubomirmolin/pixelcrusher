@@ -27,14 +27,17 @@ struct ContentView: View {
     @State private var dismissedProcessedItemIDs: Set<UUID> = []
     @State private var punchSession: PunchSession?
     @State private var playedPunchIDs: Set<UUID> = []
+    @State private var activeFolderSession: FolderDropSession?
+    @State private var activeFolderPunch: FolderDropSession?
+    @State private var expandedFolderIDs: Set<UUID> = []
     @State private var dropValidationState: DropValidationState = .idle
 
     private var isEmptyState: Bool {
-        processedItems.isEmpty && punchSession == nil && !model.isQueueRunning
+        visibleProcessedItems.isEmpty && folderSessionFiles.isEmpty && activeFolderPunch == nil && !model.isQueueRunning
     }
 
     private var showBottomHint: Bool {
-        !processedItems.isEmpty || punchSession != nil || model.isQueueRunning
+        !visibleProcessedItems.isEmpty || !folderSessionFiles.isEmpty || activeFolderSession != nil || activeFolderPunch != nil || model.isQueueRunning
     }
 
     private var processedItems: [ProcessingResult] {
@@ -43,6 +46,34 @@ struct ContentView: View {
             .sorted { lhs, rhs in
                 lhs.enqueuedOrder < rhs.enqueuedOrder
             }
+    }
+
+    private var activeFolderSessionFiles: [ProcessingResult] {
+        guard let folderSession = activeFolderSession else {
+            return []
+        }
+
+        return model.results
+            .filter { isFile($0.inputURL, inside: folderSession.folderURL) }
+            .sorted { lhs, rhs in
+                lhs.enqueuedOrder < rhs.enqueuedOrder
+            }
+    }
+
+    private var folderSessionFiles: [ProcessingResult] {
+        guard activeFolderSession != nil else {
+            return []
+        }
+
+        return activeFolderSessionFiles.filter { !dismissedProcessedItemIDs.contains($0.id) }
+    }
+
+    private var visibleProcessedItems: [ProcessingResult] {
+        guard let folderSession = activeFolderSession else {
+            return processedItems
+        }
+
+        return processedItems.filter { !isFile($0.inputURL, inside: folderSession.folderURL) }
     }
 
     var body: some View {
@@ -84,6 +115,9 @@ struct ContentView: View {
         }
         .onChange(of: model.results.count) { _ in
             syncPunchSession()
+        }
+        .onChange(of: model.latestFolderDropSession) { _ in
+            syncFolderSession()
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
@@ -153,10 +187,14 @@ struct ContentView: View {
                     ScrollViewReader { proxy in
                         ScrollView {
                             VStack(spacing: 14) {
-                                if !processedItems.isEmpty {
-                                    ForEach(processedItems) { result in
+                                if !visibleProcessedItems.isEmpty {
+                                    ForEach(visibleProcessedItems) { result in
                                         resultRow(for: result)
                                     }
+                                }
+
+                                if let folderSession = activeFolderSession {
+                                    folderSection(for: folderSession)
                                 }
 
                                 if let active = punchSession {
@@ -165,7 +203,10 @@ struct ContentView: View {
                                     idleProcessingSection
                                 }
 
-                                if processedItems.isEmpty && !model.isQueueRunning && punchSession == nil {
+                                if visibleProcessedItems.isEmpty
+                                    && !model.isQueueRunning
+                                    && punchSession == nil
+                                    && activeFolderSession == nil {
                                     Text("Add files to start crushing.")
                                         .font(.subheadline)
                                         .foregroundStyle(.secondary)
@@ -322,6 +363,182 @@ struct ContentView: View {
         }
     }
 
+    private func folderSection(for session: FolderDropSession) -> some View {
+        let isExpanded = expandedFolderIDs.contains(session.id)
+        let items = folderSessionFiles(for: session)
+        let isPunching = activeFolderPunch?.id == session.id
+
+        return VStack(spacing: 12) {
+            HStack(alignment: .center, spacing: 10) {
+                Button {
+                    toggleFolderExpansion(session.id)
+                } label: {
+                    HStack(alignment: .center, spacing: 10) {
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 12, weight: .semibold))
+
+                        Image(systemName: "folder.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.orange)
+
+                        Text(session.folderURL.lastPathComponent)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.88) : Color.primary)
+                            .lineLimit(1)
+
+                        Spacer(minLength: 0)
+
+                        Text("\(items.count) files")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                }
+                .buttonStyle(.plain)
+            }
+
+            if isPunching {
+                FolderPunchAnimation(folderName: session.folderURL.lastPathComponent)
+                    .frame(maxWidth: 300)
+                    .padding(.bottom, 2)
+            } else if isExpanded {
+                if items.isEmpty {
+                    Text("Preparing files…")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 8)
+                } else {
+                    VStack(spacing: 10) {
+                        ForEach(items) { result in
+                            folderFileRow(for: result)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(nsColor: colorScheme == .dark
+                    ? NSColor(calibratedWhite: 0.12, alpha: 0.92)
+                    : NSColor(calibratedWhite: 0.98, alpha: 0.95)
+                ))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(colorScheme == .dark ? 0.12 : 0.14), lineWidth: 1)
+        )
+    }
+
+    private func folderFileRow(for result: ProcessingResult) -> some View {
+        let previewURL = processingSourceURL(for: result)
+        let isTerminal = result.state.isTerminal
+        let progress = progress(for: result.state)
+
+        return VStack(spacing: 7) {
+            HStack(alignment: .center, spacing: 14) {
+                ResultThumbnail(url: previewURL)
+
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(result.inputURL.lastPathComponent)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.86) : Color.primary)
+                        .lineLimit(1)
+
+                    if isTerminal {
+                        HStack(spacing: 8) {
+                            Text(formatBytes(result.inputBytes))
+                                .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.55) : .secondary)
+
+                            Image(systemName: "arrow.right")
+                                .font(.caption2)
+                                .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.5) : .secondary)
+
+                            Text(formatBytes(result.outputBytes))
+                                .foregroundStyle(result.state == .done ? Color.green.opacity(0.92) : .secondary)
+                                .fontWeight(result.state == .done ? .semibold : .regular)
+
+                            if let delta = sizeDelta(for: result) {
+                                Text(delta.text)
+                                    .font(.caption2.weight(.semibold))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(delta.color.opacity(0.16), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                                    .foregroundStyle(delta.color)
+                            }
+                        }
+                        .font(.system(size: 12, weight: .medium))
+                    } else {
+                        Text(result.statusText)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                if isTerminal {
+                    Text(resolutionText(for: result))
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.65) : .secondary)
+                        .frame(minWidth: 110, alignment: .trailing)
+                } else {
+                    Text("\(Int(progress * 100))%")
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 44, alignment: .trailing)
+                }
+
+                if isTerminal {
+                    HStack(spacing: 8) {
+                        actionGlyphButton(symbol: "crop", help: "Crop image") {
+                            cropTarget = result
+                            cropDraftWidth = ""
+                            cropDraftHeight = ""
+                            cropDraftX = "0"
+                            cropDraftY = "0"
+                        }
+
+                        actionGlyphButton(symbol: "arrow.up.left.and.arrow.down.right", help: "Resize image") {
+                            resizeTarget = result
+                            resizeDraftWidth = model.fixedResizeWidth
+                            resizeDraftHeight = model.fixedResizeHeight
+                            resizeDraftLock = true
+                        }
+                    }
+                }
+
+                Image(systemName: result.state == .done ? "checkmark.circle" : "exclamationmark.triangle")
+                    .foregroundStyle(result.state == .done ? Color.green.opacity(0.92) : Color.orange)
+                    .font(.system(size: 24, weight: .medium))
+                    .frame(width: 24)
+            }
+
+            if !isTerminal {
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+                    .controlSize(.small)
+                    .tint(result.state == .failed ? .red : .accentColor)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(nsColor: colorScheme == .dark
+                    ? NSColor(calibratedWhite: 0.17, alpha: 0.9)
+                    : NSColor(calibratedWhite: 1.0, alpha: 0.98)
+                ))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.white.opacity(colorScheme == .dark ? 0.1 : 0.08), lineWidth: 1)
+        )
+    }
+
     private func resultRow(for result: ProcessingResult) -> some View {
         let previewURL = processingSourceURL(for: result)
 
@@ -401,6 +618,54 @@ struct ContentView: View {
                 .stroke(Color.white.opacity(colorScheme == .dark ? 0.1 : 0.08), lineWidth: 1)
         )
         .animation(.easeOut(duration: 0.25), value: result.state)
+    }
+
+    private func toggleFolderExpansion(_ folderID: UUID) {
+        if expandedFolderIDs.contains(folderID) {
+            expandedFolderIDs.remove(folderID)
+        } else {
+            expandedFolderIDs.insert(folderID)
+        }
+    }
+
+    private func folderSessionFiles(for session: FolderDropSession) -> [ProcessingResult] {
+        return activeFolderSessionFiles.filter { result in
+            !dismissedProcessedItemIDs.contains(result.id) &&
+            isFile(result.inputURL, inside: session.folderURL)
+        }
+    }
+
+    private func isFile(_ fileURL: URL, inside folderURL: URL) -> Bool {
+        let folderPath = folderURL.standardized.path
+        let filePath = fileURL.standardized.path
+
+        if folderPath.isEmpty {
+            return false
+        }
+
+        if filePath == folderPath {
+            return false
+        }
+
+        let folderPrefix = folderPath.hasSuffix("/") ? folderPath : "\(folderPath)/"
+        return filePath.hasPrefix(folderPrefix)
+    }
+
+    private func progress(for state: ProcessingItemState) -> Double {
+        switch state {
+        case .queued:
+            return 0.05
+        case .preparing:
+            return 0.28
+        case .optimizing:
+            return 0.67
+        case .saving:
+            return 0.92
+        case .done:
+            return 1.0
+        case .failed:
+            return 1.0
+        }
     }
 
     private var bottomHintBar: some View {
@@ -564,6 +829,24 @@ struct ContentView: View {
             inputURL: processingSourceURL(for: result),
             cropTransform: model.punchCropTransform(for: activeID)
         )
+    }
+
+    private func syncFolderSession() {
+        guard let folderSession = model.consumeLatestFolderDropSession() else {
+            return
+        }
+
+        activeFolderSession = folderSession
+        expandedFolderIDs.insert(folderSession.id)
+        activeFolderPunch = folderSession
+
+        let folderPunchSessionID = folderSession.id
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.15) {
+            guard activeFolderPunch?.id == folderPunchSessionID else {
+                return
+            }
+            activeFolderPunch = nil
+        }
     }
 
     private func cropSheet(for result: ProcessingResult) -> some View {

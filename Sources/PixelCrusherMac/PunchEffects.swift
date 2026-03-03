@@ -191,7 +191,7 @@ private final class PunchAnimator {
         }
 
         if elapsed > 0.6 && elapsed <= 2.2 {
-            drawFist(context: &transformed, elapsed: elapsed, imageY: imgY, canvasWidth: canvasSize.width)
+            drawFist(context: &transformed, elapsed: elapsed, imageFrame: imageFrame, canvasSize: canvasSize)
         }
 
         for particle in particles {
@@ -235,16 +235,22 @@ private final class PunchAnimator {
         }
     }
 
-    private func drawFist(context: inout GraphicsContext, elapsed: TimeInterval, imageY: CGFloat, canvasWidth: CGFloat) {
+    private func drawFist(
+        context: inout GraphicsContext,
+        elapsed: TimeInterval,
+        imageFrame: CGRect,
+        canvasSize: CGSize
+    ) {
         let fistW: CGFloat = 100
         let fistH: CGFloat = 140
-        let fistX = (canvasWidth - fistW) * 0.5
-        let targetY = imageY - fistH + 25
+        let fistX = (canvasSize.width - fistW) * 0.5
+        let targetY = max(-20, imageFrame.minY - fistH * 0.55)
+        let startY = -fistH
 
         let fistY: CGFloat
         if elapsed > 0.6 && elapsed <= 1.0 {
             let p = CGFloat((elapsed - 0.6) / 0.4)
-            fistY = -fistH + (targetY + fistH) * (p * p * p)
+            fistY = startY + (targetY - startY) * (p * p * p)
         } else if elapsed <= 1.6 {
             fistY = targetY
         } else {

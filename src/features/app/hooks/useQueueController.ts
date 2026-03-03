@@ -20,6 +20,7 @@ import type {
   CompressionProfileId,
   CropDraft,
   DragValidationState,
+  FolderDropState,
   PunchCropTransform,
   PunchQueueItem,
   ResizeDraft,
@@ -29,6 +30,8 @@ import {
   classifyInputPath,
   dragStateFromFiles,
   dragStateFromPaths,
+  fileExtension,
+  basename,
   isTauriRuntime,
 } from '../utils';
 
@@ -56,6 +59,29 @@ type EnqueueOptionsPayload = {
 
 function processingSourcePath(item: JobResultEntry): string {
   return item.output_path || item.input_path;
+}
+
+function normalizeFolderPath(path: string): string {
+  return path.trim().replace(/\\+/g, '/').replace(/\/+$/g, '');
+}
+
+function deriveFolderDropState(paths: string[]): FolderDropState | null {
+  const normalized = [...new Set(paths.map((path) => normalizeFolderPath(path)).filter((path) => path.length > 0))];
+
+  if (normalized.length !== 1) {
+    return null;
+  }
+
+  const folderPath = normalized[0];
+  if (fileExtension(folderPath).length > 0) {
+    return null;
+  }
+
+  return {
+    id: `folder-${folderPath}-${Date.now()}`,
+    folderName: basename(folderPath),
+    folderPath,
+  };
 }
 
 function parseNonNegativeCoordinate(raw: string): number {
@@ -89,6 +115,9 @@ export function useQueueController() {
   const [dismissedResultIDs, setDismissedResultIDs] = useState<Set<string>>(new Set());
   const [punchQueue, setPunchQueue] = useState<PunchQueueItem[]>([]);
   const [activePunch, setActivePunch] = useState<PunchQueueItem | null>(null);
+  const [activeFolderDrop, setActiveFolderDrop] = useState<FolderDropState | null>(null);
+  const [activeFolderPunch, setActiveFolderPunch] = useState<FolderDropState | null>(null);
+  const folderPunchTimerRef = useRef<number | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollViewportRef = useRef<HTMLDivElement>(null);
@@ -130,6 +159,25 @@ export function useQueueController() {
   useEffect(() => {
     optionsPayloadRef.current = optionsPayload;
   }, [optionsPayload]);
+
+  const stopFolderPunch = useCallback(() => {
+    if (folderPunchTimerRef.current != null) {
+      window.clearTimeout(folderPunchTimerRef.current);
+      folderPunchTimerRef.current = null;
+    }
+
+    setActiveFolderPunch(null);
+  }, []);
+
+  const startFolderPunch = useCallback((paths: string[]) => {
+    const folderDrop = deriveFolderDropState(paths);
+    if (!folderDrop) {
+      return;
+    }
+
+    setActiveFolderDrop(folderDrop);
+    setActiveFolderPunch(folderDrop);
+  }, []);
 
   const enqueueWithOptions = useCallback(
     async (
@@ -214,6 +262,23 @@ export function useQueueController() {
   }, [enqueuePaths]);
 
   useEffect(() => {
+    if (!activeFolderPunch) {
+      return;
+    }
+
+    folderPunchTimerRef.current = window.setTimeout(() => {
+      stopFolderPunch();
+    }, 1100);
+
+    return () => {
+      if (folderPunchTimerRef.current != null) {
+        window.clearTimeout(folderPunchTimerRef.current);
+        folderPunchTimerRef.current = null;
+      }
+    };
+  }, [activeFolderPunch, stopFolderPunch]);
+
+  useEffect(() => {
     invoke<JobResultEntry[]>('recent_results')
       .then((items) => {
         dispatch({ type: 'SET_RECENT', payload: items });
@@ -279,6 +344,7 @@ export function useQueueController() {
 
           if (payload.type === 'drop') {
             setDragState('idle');
+            startFolderPunch(payload.paths ?? []);
             if (enqueuePathsRef.current) {
               void enqueuePathsRef.current(payload.paths ?? []);
             }
@@ -355,6 +421,7 @@ export function useQueueController() {
     const paths = files
       .map((file) => (file as unknown as { path?: string }).path)
       .filter((path): path is string => !!path);
+    startFolderPunch(paths);
 
     await enqueuePaths(paths);
   };
@@ -460,6 +527,10 @@ export function useQueueController() {
     setActivePunch(null);
   }, []);
 
+  const handleFolderPunchComplete = useCallback(() => {
+    stopFolderPunch();
+  }, [stopFolderPunch]);
+
   const clearProcessedItems = useCallback(() => {
     setDismissedResultIDs((previous) => {
       const next = new Set(previous);
@@ -468,7 +539,8 @@ export function useQueueController() {
     });
   }, [queueState.recent]);
 
-  const isEmptyState = processedItems.length === 0 && activePunch == null;
+  const hasActiveJobs = Object.values(queueState.jobs).some((job) => !TERMINAL_JOB_STATUSES.has(job.status));
+  const isEmptyState = processedItems.length === 0 && activePunch == null && activeFolderPunch == null && !hasActiveJobs && activeFolderDrop == null;
 
   return {
     queueState,
@@ -483,6 +555,8 @@ export function useQueueController() {
     resizeDraft,
     setResizeDraft,
     activePunch,
+    activeFolderDrop,
+    activeFolderPunch,
     fileInputRef,
     scrollViewportRef,
     processedItems,
@@ -498,6 +572,7 @@ export function useQueueController() {
     applyItemCrop,
     applyItemResize,
     handlePunchComplete,
+    handleFolderPunchComplete,
     clearProcessedItems,
     closeCropModal: () => setActiveCropItem(null),
     closeResizeModal: () => setActiveResizeItem(null),

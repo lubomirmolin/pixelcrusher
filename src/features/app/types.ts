@@ -25,6 +25,12 @@ export type ProfilePreset = {
   runPngout: boolean;
 };
 
+export type FolderDropState = {
+  id: string;
+  folderName: string;
+  folderPath: string;
+};
+
 export type CropDraft = {
   width: string;
   height: string;

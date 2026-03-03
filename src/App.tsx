@@ -23,6 +23,8 @@ function App() {
     resizeDraft,
     setResizeDraft,
     activePunch,
+    activeFolderDrop,
+    activeFolderPunch,
     fileInputRef,
     scrollViewportRef,
     processedItems,
@@ -38,6 +40,7 @@ function App() {
     applyItemCrop,
     applyItemResize,
     handlePunchComplete,
+    handleFolderPunchComplete,
     clearProcessedItems,
     closeCropModal,
     closeResizeModal,
@@ -114,11 +117,15 @@ function App() {
             <div className="flex flex-col flex-1 gap-4 min-h-0" data-testid="list-state">
               <ProcessedItemsPanel
                 processedItems={processedItems}
+                queueJobs={queueState.jobs}
+                activeFolderDrop={activeFolderDrop}
+                activeFolderPunch={activeFolderPunch}
                 activePunch={activePunch}
                 onOpenItemCrop={openItemCropModal}
                 onOpenItemResize={openItemResizeModal}
                 onClearProcessedItems={clearProcessedItems}
                 onPunchComplete={handlePunchComplete}
+                onFolderPunchComplete={handleFolderPunchComplete}
                 scrollViewportRef={scrollViewportRef}
               />
             </div>

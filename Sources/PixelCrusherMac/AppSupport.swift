@@ -44,6 +44,11 @@ struct ProcessingResult: Identifiable {
     }
 }
 
+struct FolderDropSession: Equatable, Identifiable {
+    let id: UUID
+    let folderURL: URL
+}
+
 struct PunchCropTransform: Equatable {
     let width: Int
     let height: Int

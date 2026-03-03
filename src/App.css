@@ -391,6 +391,80 @@ select {
   font-size: 12px;
 }
 
+.folder-drop-scene {
+  width: 240px;
+  height: 170px;
+  position: relative;
+  display: grid;
+  place-items: end center;
+}
+
+.folder-drop-folder {
+  color: #9a5f10;
+  position: relative;
+  transform: translateY(18px);
+}
+
+.folder-drop-hand {
+  position: absolute;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-18px) rotate(-35deg);
+  color: #2d3847;
+  transform-origin: 16px 36px;
+  animation: folder-punch 1.1s cubic-bezier(0.2, 0.6, 0.1, 1) both;
+}
+
+.folder-drop-shadow {
+  width: 108px;
+  height: 10px;
+  border-radius: 999px;
+  margin-bottom: 4px;
+  margin-left: 38px;
+  background: rgba(0, 0, 0, 0.12);
+  animation: folder-dust 1.1s cubic-bezier(0.2, 0.6, 0.1, 1) both;
+}
+
+@keyframes folder-punch {
+  0% {
+    opacity: 0;
+    transform: translate(-20px, -18px) rotate(-45deg) scale(0.8);
+  }
+  42% {
+    opacity: 1;
+    transform: translate(4px, 16px) rotate(8deg) scale(1);
+  }
+  58% {
+    transform: translate(16px, 4px) rotate(-8deg) scale(1.03);
+  }
+  74% {
+    transform: translate(4px, 12px) rotate(-6deg) scale(0.98);
+  }
+  100% {
+    transform: translate(-18px, 24px) rotate(-42deg) scale(0.85);
+    opacity: 0.75;
+  }
+}
+
+@keyframes folder-dust {
+  0% {
+    opacity: 0;
+    transform: scaleX(0.6);
+  }
+  45% {
+    opacity: 0.2;
+    transform: scaleX(1);
+  }
+  70% {
+    opacity: 0.16;
+    transform: scaleX(1.12);
+  }
+  100% {
+    opacity: 0.25;
+    transform: scaleX(1);
+  }
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;

@@ -139,6 +139,7 @@ final class AppViewModel: ObservableObject {
     @Published var isDropTargeted = false
     @Published private(set) var results: [ProcessingResult] = []
     @Published private(set) var folderRoots: [URL] = []
+    @Published private(set) var latestFolderDropSession: FolderDropSession?
 
     @Published private(set) var pendingCount = 0
     @Published private(set) var completedCount = 0
@@ -383,6 +384,12 @@ final class AppViewModel: ObservableObject {
         }
 
         if isDirectory.boolValue {
+            let folderSession = FolderDropSession(
+                id: UUID(),
+                folderURL: url
+            )
+            latestFolderDropSession = folderSession
+
             if !folderRoots.contains(url) {
                 folderRoots.append(url)
             }
@@ -448,6 +455,12 @@ final class AppViewModel: ObservableObject {
         )
         results.append(result)
         refreshQueueProgress()
+    }
+
+    func consumeLatestFolderDropSession() -> FolderDropSession? {
+        let session = latestFolderDropSession
+        latestFolderDropSession = nil
+        return session
     }
 
     private func startQueueWorkerIfNeeded() {
