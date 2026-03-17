@@ -41,6 +41,7 @@ function configureInvoke(overrides?: Partial<Record<string, unknown>>) {
     if (command === 'app_version') return '1.2.3';
     if (command === 'runtime_platform') return 'windows';
     if (command === 'select_input_files') return overrides?.select_input_files ?? [];
+    if (command === 'select_input_folder') return overrides?.select_input_folder ?? null;
     if (command === 'enqueue_paths') return overrides?.enqueue_paths ?? payload ?? [];
     if (command === 'open_external_url') return [];
     return [];
@@ -85,6 +86,7 @@ describe('App Swift-style UI', () => {
     expect(screen.getByRole('combobox', { name: 'Compression profile' })).toBeTruthy();
     expect(screen.getByRole('checkbox', { name: 'Autocrop' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Browse Files' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Browse Folder' })).toBeTruthy();
   });
 
   it('renders processed list when recent items exist', async () => {
@@ -140,6 +142,28 @@ describe('App Swift-style UI', () => {
     await waitFor(() => {
       const alert = screen.getByRole('alert');
       expect(alert.textContent).toContain('Unsupported format');
+    });
+  });
+
+  it('enqueues selected folder when using folder picker', async () => {
+    configureInvoke({
+      select_input_folder: '/Users/demo/assets/folder',
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole('button', { name: 'Browse Folder' }));
+
+    await waitFor(() => {
+      const pickerCall = invokeMock.mock.calls.find(([command]) => command === 'select_input_folder');
+      expect(pickerCall).toBeTruthy();
+
+      const enqueueCall = invokeMock.mock.calls.find(([command]) => command === 'enqueue_paths');
+      expect(enqueueCall).toBeTruthy();
+
+      const payload = enqueueCall?.[1] as { paths?: string[] };
+      expect(payload.paths).toEqual(['/Users/demo/assets/folder']);
     });
   });
 

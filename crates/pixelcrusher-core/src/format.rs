@@ -31,6 +31,23 @@ impl AssetFormat {
             AssetFormat::Unknown => "bin",
         }
     }
+
+    pub fn from_output_format(value: &str) -> Option<AssetFormat> {
+        match value.trim().to_lowercase().as_str() {
+            "jpg" | "jpeg" => Some(AssetFormat::Jpeg),
+            "png" => Some(AssetFormat::Png),
+            "gif" => Some(AssetFormat::Gif),
+            "svg" => Some(AssetFormat::Svg),
+            _ => None,
+        }
+    }
+
+    pub fn is_raster(&self) -> bool {
+        matches!(
+            self,
+            AssetFormat::Png | AssetFormat::Jpeg | AssetFormat::Gif
+        )
+    }
 }
 
 pub fn detect_format(path: &Path) -> AssetFormat {
@@ -98,5 +115,30 @@ mod tests {
             detect_by_bytes(br#"<?xml version='1.0'?><svg></svg>"#),
             AssetFormat::Svg
         );
+    }
+
+    #[test]
+    fn parses_requested_output_format() {
+        assert_eq!(
+            AssetFormat::from_output_format("png"),
+            Some(AssetFormat::Png)
+        );
+        assert_eq!(
+            AssetFormat::from_output_format("JPG"),
+            Some(AssetFormat::Jpeg)
+        );
+        assert_eq!(
+            AssetFormat::from_output_format("jpeg"),
+            Some(AssetFormat::Jpeg)
+        );
+        assert_eq!(
+            AssetFormat::from_output_format("gif"),
+            Some(AssetFormat::Gif)
+        );
+        assert_eq!(
+            AssetFormat::from_output_format("svg"),
+            Some(AssetFormat::Svg)
+        );
+        assert_eq!(AssetFormat::from_output_format("webp"), None);
     }
 }

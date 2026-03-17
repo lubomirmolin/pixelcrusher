@@ -62,6 +62,7 @@ pub enum CropAnchor {
 pub struct ProcessingOptions {
     pub trim_transparent: bool,
     pub transform: TransformOptions,
+    pub output_format: Option<String>,
     pub compression: CompressionOptions,
 }
 

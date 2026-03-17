@@ -365,7 +365,7 @@ export function useQueueController() {
       unlistenQueue?.();
       unlistenDragDrop?.();
     };
-  }, []);
+  }, [startFolderPunch]);
 
   useEffect(() => {
     if (activePunch || punchQueue.length === 0) {
@@ -408,6 +408,29 @@ export function useQueueController() {
       });
     }
   }, [enqueuePaths]);
+
+  const onOpenFolderPicker = useCallback(async () => {
+    if (!isTauriRuntime()) {
+      fileInputRef.current?.click();
+      return;
+    }
+
+    try {
+      const selected = await invoke<string | null>('select_input_folder');
+      const folderPath = selected?.trim();
+      if (!folderPath) {
+        return;
+      }
+
+      startFolderPunch([folderPath]);
+      await enqueuePaths([folderPath]);
+    } catch {
+      dispatch({
+        type: 'QUEUE_ERROR',
+        payload: 'Unable to open the folder picker.',
+      });
+    }
+  }, [enqueuePaths, startFolderPunch]);
 
   const onDropFiles: DragEventHandler<HTMLDivElement> = async (event) => {
     event.preventDefault();
@@ -562,6 +585,7 @@ export function useQueueController() {
     processedItems,
     isEmptyState,
     onOpenSystemPicker,
+    onOpenFolderPicker,
     onDropFiles,
     onChooseFiles,
     onDragEnter,

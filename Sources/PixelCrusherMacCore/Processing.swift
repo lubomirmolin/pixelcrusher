@@ -1,5 +1,35 @@
 import Foundation
 
+public enum OutputImageFormat: String, Sendable, CaseIterable {
+    case png
+    case jpeg
+    case gif
+
+    public var displayName: String {
+        switch self {
+        case .png:
+            return "PNG"
+        case .jpeg:
+            return "JPG"
+        case .gif:
+            return "GIF"
+        }
+    }
+
+    public static func fromPathExtension(_ pathExtension: String) -> OutputImageFormat? {
+        switch pathExtension.lowercased() {
+        case "png":
+            return .png
+        case "jpg", "jpeg":
+            return .jpeg
+        case "gif":
+            return .gif
+        default:
+            return nil
+        }
+    }
+}
+
 public struct ImageProcessingOptions: Sendable {
     public var overwriteOriginal: Bool
     public var autoTrimTransparentBorders: Bool
@@ -7,6 +37,7 @@ public struct ImageProcessingOptions: Sendable {
     public var fixedCropOrigin: CropOrigin?
     public var fixedResizeSize: CropSize?
     public var fixedCropAnchor: CropAnchor
+    public var outputFormat: OutputImageFormat?
     public var optimizer: OptimizerPreferences
     public var outputSuffix: String
 
@@ -17,6 +48,7 @@ public struct ImageProcessingOptions: Sendable {
         fixedCropOrigin: CropOrigin? = nil,
         fixedResizeSize: CropSize? = nil,
         fixedCropAnchor: CropAnchor = .center,
+        outputFormat: OutputImageFormat? = nil,
         optimizer: OptimizerPreferences = OptimizerPreferences(),
         outputSuffix: String = "-processed"
     ) {
@@ -26,6 +58,7 @@ public struct ImageProcessingOptions: Sendable {
         self.fixedCropOrigin = fixedCropOrigin
         self.fixedResizeSize = fixedResizeSize
         self.fixedCropAnchor = fixedCropAnchor
+        self.outputFormat = outputFormat
         self.optimizer = optimizer
         self.outputSuffix = outputSuffix
     }
@@ -92,13 +125,19 @@ public final class ImageProcessor: @unchecked Sendable {
     public func processImage(
         at inputURL: URL,
         options: ImageProcessingOptions,
+        outputDirectory: URL? = nil,
         statusHandler: (@Sendable (ProcessingStatusUpdate) -> Void)? = nil
     ) throws -> ImageProcessingReport {
         guard Self.isSupported(inputURL: inputURL) else {
             throw ImageProcessingError.unsupportedFormat(inputURL.pathExtension)
         }
 
-        return try backend.processImage(at: inputURL, options: options, statusHandler: statusHandler)
+        return try backend.processImage(
+            at: inputURL,
+            options: options,
+            outputDirectory: outputDirectory,
+            statusHandler: statusHandler
+        )
     }
 
     private static func isSupported(inputURL: URL) -> Bool {
@@ -177,15 +216,22 @@ public struct PixelCrusherBackendClient: Sendable {
     public func processImage(
         at inputURL: URL,
         options: ImageProcessingOptions,
+        outputDirectory: URL? = nil,
         statusHandler: (@Sendable (ProcessingStatusUpdate) -> Void)? = nil
     ) throws -> ImageProcessingReport {
         guard let executable = cliExecutableURL else {
             throw ImageProcessingError.backendBinaryMissing
         }
 
+        let effectiveOutputDirectory = outputDirectory ?? outputDirectoryOverride
+
         let request = CLIProcessRequest(
             inputPath: inputURL.path,
-            outputDir: Self.defaultOutputDirectory(for: inputURL, environment: environment, explicitOverride: outputDirectoryOverride).path,
+            outputDir: Self.defaultOutputDirectory(
+                for: inputURL,
+                environment: environment,
+                explicitOverride: effectiveOutputDirectory
+            ).path,
             options: CLIProcessOptions(from: options)
         )
 
@@ -452,6 +498,7 @@ private struct CLIProcessRequest: Encodable {
 private struct CLIProcessOptions: Encodable {
     let trimTransparent: Bool
     let transform: CLITransform
+    let outputFormat: String?
     let compression: CLICompression
 
     init(from options: ImageProcessingOptions) {
@@ -465,12 +512,14 @@ private struct CLIProcessOptions: Encodable {
             resizeWidth: options.fixedResizeSize.map { UInt32($0.width) },
             resizeHeight: options.fixedResizeSize.map { UInt32($0.height) }
         )
+        outputFormat = options.outputFormat?.rawValue
         compression = CLICompression(from: options.optimizer)
     }
 
     enum CodingKeys: String, CodingKey {
         case trimTransparent = "trim_transparent"
         case transform
+        case outputFormat = "output_format"
         case compression
     }
 }

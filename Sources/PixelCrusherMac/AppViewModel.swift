@@ -152,6 +152,7 @@ final class AppViewModel: ObservableObject {
     private var queueStateMachine = ProcessingQueueStateMachine()
     private var resultIndexByID: [UUID: Int] = [:]
     private var optionsOverrideByID: [UUID: ImageProcessingOptions] = [:]
+    private var outputDirectoryOverrideByID: [UUID: URL] = [:]
     private var queueWorkerTask: Task<Void, Never>?
     private var currentJobTasks: [UUID: Task<ImageProcessingReport, Error>] = [:]
     private var stopAfterCurrent = false
@@ -189,7 +190,8 @@ final class AppViewModel: ObservableObject {
         } else {
             cropAnchor = .center
         }
-        fixedResizeEnabled = defaults.object(forKey: DefaultsKey.fixedResizeEnabled) as? Bool ?? false
+        let persistedFixedResizeEnabled = defaults.object(forKey: DefaultsKey.fixedResizeEnabled) as? Bool ?? false
+        fixedResizeEnabled = persistedFixedResizeEnabled
         fixedResizeWidth = defaults.string(forKey: DefaultsKey.fixedResizeWidth) ?? ""
         fixedResizeHeight = defaults.string(forKey: DefaultsKey.fixedResizeHeight) ?? ""
 
@@ -207,6 +209,11 @@ final class AppViewModel: ObservableObject {
 
         gifOptimizationLevel = defaults.object(forKey: DefaultsKey.gifOptimizationLevel) as? Double ?? 3
         gifLossyLevel = defaults.object(forKey: DefaultsKey.gifLossyLevel) as? Double ?? 0
+
+        if persistedFixedResizeEnabled {
+            // Resize is applied per-image from the results list; clear legacy global state.
+            fixedResizeEnabled = false
+        }
 
         refreshToolAvailability()
     }
@@ -320,6 +327,35 @@ final class AppViewModel: ObservableObject {
         enqueueExternal(urls: [sourceURL], optionsOverride: options)
     }
 
+    func enqueueResizedImage(sourceURL: URL, width: Int, height: Int) {
+        guard let resizeSize = try? CropSize(width: width, height: height) else {
+            return
+        }
+
+        var options = currentOptions()
+        options.fixedResizeSize = resizeSize
+        enqueueExternal(urls: [sourceURL], optionsOverride: options)
+    }
+
+    func availableConversionFormats(for sourceURL: URL) -> [OutputImageFormat] {
+        guard let sourceFormat = OutputImageFormat.fromPathExtension(sourceURL.pathExtension) else {
+            return []
+        }
+
+        return OutputImageFormat.allCases.filter { $0 != sourceFormat }
+    }
+
+    func enqueueConvertedImage(sourceURL: URL, to targetFormat: OutputImageFormat) {
+        guard let sourceFormat = OutputImageFormat.fromPathExtension(sourceURL.pathExtension),
+              sourceFormat != targetFormat else {
+            return
+        }
+
+        var options = currentOptions()
+        options.outputFormat = targetFormat
+        enqueueExternal(urls: [sourceURL], optionsOverride: options)
+    }
+
     func punchCropTransform(for id: UUID) -> PunchCropTransform? {
         guard let options = optionsOverrideByID[id],
               let size = options.fixedCropSize else {
@@ -340,6 +376,7 @@ final class AppViewModel: ObservableObject {
 
         for id in cancelledIDs {
             optionsOverrideByID[id] = nil
+            outputDirectoryOverrideByID[id] = nil
             guard let index = resultIndexByID[id] else { continue }
             results[index].success = false
             results[index].state = .failed
@@ -395,12 +432,22 @@ final class AppViewModel: ObservableObject {
             }
 
             let folderURL = url
+            let outputRoot = Self.folderOutputRoot(for: folderURL)
             Task {
                 let files = await Task.detached(priority: .userInitiated) {
                     Self.collectSupportedFiles(in: folderURL)
                 }.value
                 for file in files {
-                    enqueueFile(file, optionsOverride: optionsOverride)
+                    let outputDirectory = Self.folderOutputDirectory(
+                        for: file,
+                        folderRoot: folderURL,
+                        outputRoot: outputRoot
+                    )
+                    enqueueFile(
+                        file,
+                        optionsOverride: optionsOverride,
+                        outputDirectoryOverride: outputDirectory
+                    )
                 }
             }
             return
@@ -413,10 +460,17 @@ final class AppViewModel: ObservableObject {
         enqueueFile(url, optionsOverride: optionsOverride)
     }
 
-    private func enqueueFile(_ fileURL: URL, optionsOverride: ImageProcessingOptions? = nil) {
+    private func enqueueFile(
+        _ fileURL: URL,
+        optionsOverride: ImageProcessingOptions? = nil,
+        outputDirectoryOverride: URL? = nil
+    ) {
         let queuedItem = queueStateMachine.enqueue(inputURL: fileURL)
         if let optionsOverride {
             optionsOverrideByID[queuedItem.id] = optionsOverride
+        }
+        if let outputDirectoryOverride {
+            outputDirectoryOverrideByID[queuedItem.id] = outputDirectoryOverride
         }
         let result = ProcessingResult(
             id: queuedItem.id,
@@ -533,6 +587,7 @@ final class AppViewModel: ObservableObject {
 
             let inputURL = results[index].inputURL
             let options = optionsOverrideByID[nextItem.id] ?? currentOptions()
+            let outputDirectory = outputDirectoryOverrideByID[nextItem.id]
             let processor = self.processor
 
             let statusBridge: @Sendable (ProcessingStatusUpdate) -> Void = { [weak self] update in
@@ -542,7 +597,12 @@ final class AppViewModel: ObservableObject {
             }
 
             currentJobTasks[nextItem.id] = Task.detached(priority: .userInitiated) {
-                try processor.processImage(at: inputURL, options: options, statusHandler: statusBridge)
+                try processor.processImage(
+                    at: inputURL,
+                    options: options,
+                    outputDirectory: outputDirectory,
+                    statusHandler: statusBridge
+                )
             }
         }
     }
@@ -588,6 +648,7 @@ final class AppViewModel: ObservableObject {
     private func completeJob(id: UUID, report: ImageProcessingReport) {
         try? queueStateMachine.transition(id: id, to: .done)
         optionsOverrideByID[id] = nil
+        outputDirectoryOverrideByID[id] = nil
 
         guard let index = resultIndexByID[id] else { return }
         results[index].outputURL = report.outputURL
@@ -603,6 +664,7 @@ final class AppViewModel: ObservableObject {
     private func failJob(id: UUID, message: String) {
         try? queueStateMachine.transition(id: id, to: .failed)
         optionsOverrideByID[id] = nil
+        outputDirectoryOverrideByID[id] = nil
 
         guard let index = resultIndexByID[id] else { return }
         results[index].success = false
@@ -728,6 +790,36 @@ final class AppViewModel: ObservableObject {
         }
 
         return files.sorted { $0.path < $1.path }
+    }
+
+    nonisolated private static func folderOutputRoot(for folderURL: URL) -> URL {
+        let parent = folderURL.deletingLastPathComponent()
+        return parent.appendingPathComponent("\(folderURL.lastPathComponent) pixelcrusher", isDirectory: true)
+    }
+
+    nonisolated private static func folderOutputDirectory(
+        for fileURL: URL,
+        folderRoot: URL,
+        outputRoot: URL
+    ) -> URL {
+        let standardizedFolderRoot = folderRoot.standardizedFileURL.path
+        let standardizedInputParent = fileURL.deletingLastPathComponent().standardizedFileURL.path
+
+        if standardizedInputParent == standardizedFolderRoot {
+            return outputRoot
+        }
+
+        let rootPrefix = standardizedFolderRoot.hasSuffix("/") ? standardizedFolderRoot : "\(standardizedFolderRoot)/"
+        guard standardizedInputParent.hasPrefix(rootPrefix) else {
+            return outputRoot
+        }
+
+        let relativeParent = String(standardizedInputParent.dropFirst(rootPrefix.count))
+        guard !relativeParent.isEmpty else {
+            return outputRoot
+        }
+
+        return outputRoot.appendingPathComponent(relativeParent, isDirectory: true)
     }
 
     nonisolated private static func isSupportedFile(_ url: URL) -> Bool {

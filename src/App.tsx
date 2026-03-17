@@ -30,6 +30,7 @@ function App() {
     processedItems,
     isEmptyState,
     onOpenSystemPicker,
+    onOpenFolderPicker,
     onDropFiles,
     onChooseFiles,
     onDragEnter,
@@ -106,12 +107,20 @@ function App() {
               </div>
               <p className="text-[14px] font-medium text-gray-800">Drag & Drop images here</p>
               <p className="text-[12px] mt-1">or</p>
-              <button
-                onClick={() => void onOpenSystemPicker()}
-                className="mt-3 px-4 py-1.5 shadow-sm text-[13px] font-medium transition-colors bg-[#005fb8] border border-transparent rounded text-white hover:bg-[#0058a6] active:opacity-80"
-              >
-                Browse Files
-              </button>
+              <div className="mt-3 flex items-center gap-2">
+                <button
+                  onClick={() => void onOpenSystemPicker()}
+                  className="px-4 py-1.5 shadow-sm text-[13px] font-medium transition-colors bg-[#005fb8] border border-transparent rounded text-white hover:bg-[#0058a6] active:opacity-80"
+                >
+                  Browse Files
+                </button>
+                <button
+                  onClick={() => void onOpenFolderPicker()}
+                  className="px-4 py-1.5 shadow-sm text-[13px] font-medium transition-colors bg-white border border-gray-300 rounded text-gray-800 hover:bg-gray-50 active:opacity-80"
+                >
+                  Browse Folder
+                </button>
+              </div>
             </div>
           ) : (
             <div className="flex flex-col flex-1 gap-4 min-h-0" data-testid="list-state">

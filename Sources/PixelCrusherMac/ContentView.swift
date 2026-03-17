@@ -367,6 +367,7 @@ struct ContentView: View {
         let isExpanded = expandedFolderIDs.contains(session.id)
         let items = folderSessionFiles(for: session)
         let isPunching = activeFolderPunch?.id == session.id
+        let completedCount = items.filter { $0.state.isTerminal }.count
 
         return VStack(spacing: 12) {
             HStack(alignment: .center, spacing: 10) {
@@ -377,9 +378,10 @@ struct ContentView: View {
                         Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                             .font(.system(size: 12, weight: .semibold))
 
-                        Image(systemName: "folder.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.orange)
+                        Image(nsImage: NSWorkspace.shared.icon(forFile: session.folderURL.path))
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 16, height: 16)
 
                         Text(session.folderURL.lastPathComponent)
                             .font(.system(size: 15, weight: .semibold))
@@ -388,9 +390,20 @@ struct ContentView: View {
 
                         Spacer(minLength: 0)
 
-                        Text("\(items.count) files")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                        if items.count > 0 && completedCount < items.count {
+                            ProgressView(value: Double(completedCount), total: Double(items.count))
+                                .progressViewStyle(.linear)
+                                .controlSize(.small)
+                                .frame(width: 60)
+                            
+                            Text("\(items.count - completedCount) remaining")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("\(items.count) files")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 12)
@@ -435,6 +448,7 @@ struct ContentView: View {
 
     private func folderFileRow(for result: ProcessingResult) -> some View {
         let previewURL = processingSourceURL(for: result)
+        let conversionTargets = model.availableConversionFormats(for: previewURL)
         let isTerminal = result.state.isTerminal
         let progress = progress(for: result.state)
 
@@ -503,10 +517,11 @@ struct ContentView: View {
                         }
 
                         actionGlyphButton(symbol: "arrow.up.left.and.arrow.down.right", help: "Resize image") {
-                            resizeTarget = result
-                            resizeDraftWidth = model.fixedResizeWidth
-                            resizeDraftHeight = model.fixedResizeHeight
-                            resizeDraftLock = true
+                            beginResize(for: result)
+                        }
+
+                        if !conversionTargets.isEmpty {
+                            conversionActionMenu(sourceURL: previewURL, targets: conversionTargets)
                         }
                     }
                 }
@@ -541,6 +556,7 @@ struct ContentView: View {
 
     private func resultRow(for result: ProcessingResult) -> some View {
         let previewURL = processingSourceURL(for: result)
+        let conversionTargets = model.availableConversionFormats(for: previewURL)
 
         return HStack(alignment: .center, spacing: 14) {
             ResultThumbnail(url: previewURL)
@@ -592,10 +608,11 @@ struct ContentView: View {
                 }
 
                 actionGlyphButton(symbol: "arrow.up.left.and.arrow.down.right", help: "Resize image") {
-                    resizeTarget = result
-                    resizeDraftWidth = model.fixedResizeWidth
-                    resizeDraftHeight = model.fixedResizeHeight
-                    resizeDraftLock = true
+                    beginResize(for: result)
+                }
+
+                if !conversionTargets.isEmpty {
+                    conversionActionMenu(sourceURL: previewURL, targets: conversionTargets)
                 }
             }
 
@@ -722,6 +739,34 @@ struct ContentView: View {
         .help(help)
     }
 
+    private func conversionActionMenu(sourceURL: URL, targets: [OutputImageFormat]) -> some View {
+        Menu {
+            ForEach(targets, id: \.self) { format in
+                Button("Convert to \(format.displayName)") {
+                    model.enqueueConvertedImage(sourceURL: sourceURL, to: format)
+                }
+            }
+        } label: {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.82) : Color.primary)
+                .frame(width: 40, height: 40)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.white.opacity(colorScheme == .dark ? 0.03 : 0.9))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.white.opacity(colorScheme == .dark ? 0.2 : 0.12), lineWidth: 1)
+                )
+        }
+        .frame(width: 40, height: 40)
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Convert image format")
+    }
+
     private var dragOverlay: some View {
         let isUnsupported = dropValidationState == .unsupported
         let tintColor = isUnsupported ? Color.red : Color.accentColor
@@ -807,6 +852,20 @@ struct ContentView: View {
         return "\(Int(size.width.rounded()))×\(Int(size.height.rounded()))"
     }
 
+    private func beginResize(for result: ProcessingResult) {
+        resizeTarget = result
+        resizeDraftLock = true
+
+        guard let sourceSize = PixelCrusherImageLoader.orientedPixelSize(from: processingSourceURL(for: result)) else {
+            resizeDraftWidth = ""
+            resizeDraftHeight = ""
+            return
+        }
+
+        resizeDraftWidth = String(Int(sourceSize.width.rounded()))
+        resizeDraftHeight = String(Int(sourceSize.height.rounded()))
+    }
+
     private func processingSourceURL(for result: ProcessingResult) -> URL {
         result.outputURL ?? result.inputURL
     }
@@ -837,7 +896,6 @@ struct ContentView: View {
         }
 
         activeFolderSession = folderSession
-        expandedFolderIDs.insert(folderSession.id)
         activeFolderPunch = folderSession
 
         let folderPunchSessionID = folderSession.id
@@ -912,6 +970,7 @@ struct ContentView: View {
     }
 
     private func applyResizeDraft(for result: ProcessingResult) {
+        let sourceURL = processingSourceURL(for: result)
         let parsedWidth = Int(resizeDraftWidth)
         let parsedHeight = Int(resizeDraftHeight)
 
@@ -919,7 +978,7 @@ struct ContentView: View {
             width: parsedWidth,
             height: parsedHeight,
             lockAspectRatio: resizeDraftLock,
-            sourceSize: PixelCrusherImageLoader.orientedPixelSize(from: processingSourceURL(for: result))
+            sourceSize: PixelCrusherImageLoader.orientedPixelSize(from: sourceURL)
         )
 
         if parsedWidth == nil, let computedWidth = resolved.width {
@@ -934,14 +993,10 @@ struct ContentView: View {
               let height = resolved.height,
               width > 0,
               height > 0 else {
-            model.fixedResizeEnabled = false
-            resizeTarget = nil
             return
         }
 
-        model.fixedResizeWidth = String(width)
-        model.fixedResizeHeight = String(height)
-        model.fixedResizeEnabled = true
+        model.enqueueResizedImage(sourceURL: sourceURL, width: width, height: height)
         resizeTarget = nil
     }
 }

@@ -167,7 +167,8 @@ exit 1
                 fixedCropSize: try CropSize(width: 256, height: 128),
                 fixedCropOrigin: try CropOrigin(x: 32, y: 24),
                 fixedResizeSize: try CropSize(width: 512, height: 256),
-                fixedCropAnchor: .bottomRight
+                fixedCropAnchor: .bottomRight,
+                outputFormat: .jpeg
             )
         )
 
@@ -184,5 +185,55 @@ exit 1
         #expect(transform?["crop_anchor"] as? String == "bottom_right")
         #expect(transform?["resize_width"] as? Int == 512)
         #expect(transform?["resize_height"] as? Int == 256)
+        #expect(options?["output_format"] as? String == "jpeg")
+    }
+
+    @Test("Per-call output directory override is encoded in backend request")
+    func processImageUsesPerCallOutputDirectoryOverride() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("pixelcrusher-output-override-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let outputPath = tempDir.appendingPathComponent("out.png").path
+        let requestPath = tempDir.appendingPathComponent("request.json").path
+        let cliScript = tempDir.appendingPathComponent("fake-pixelcrusher-cli")
+
+        try """
+#!/bin/sh
+set -e
+cmd="$1"
+if [ "$cmd" = "diagnostics" ]; then
+  echo '[]'
+  exit 0
+fi
+if [ "$cmd" = "process" ]; then
+  cat > "\(requestPath)"
+  echo '{"event":"finished","payload":{"success":true,"report":{"source_path":"/tmp/input.png","destination_path":"\(outputPath)","asset_format":"png","input_bytes":100,"output_bytes":90,"elapsed_ms":11,"applied_stages":["pngquant"]},"error":null}}'
+  exit 0
+fi
+exit 1
+""".write(to: cliScript, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cliScript.path)
+
+        let inputFile = tempDir.appendingPathComponent("input.png")
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: inputFile)
+
+        let client = PixelCrusherBackendClient(
+            cliExecutableURL: cliScript,
+            environment: ProcessInfo.processInfo.environment,
+            bundledToolsDirectory: nil,
+            outputDirectory: tempDir.appendingPathComponent("client-default", isDirectory: true)
+        )
+
+        let perCallOutput = tempDir.appendingPathComponent("from-call", isDirectory: true)
+        _ = try client.processImage(
+            at: inputFile,
+            options: ImageProcessingOptions(),
+            outputDirectory: perCallOutput
+        )
+
+        let requestData = try #require(FileManager.default.contents(atPath: requestPath))
+        let json = try JSONSerialization.jsonObject(with: requestData) as? [String: Any]
+        #expect(json?["output_dir"] as? String == perCallOutput.path)
     }
 }
