@@ -14,6 +14,8 @@ struct ContentView: View {
 
     @State private var cropTarget: ProcessingResult?
     @State private var resizeTarget: ProcessingResult?
+    @State private var backgroundRemovalTarget: ProcessingResult?
+    @State private var rasterConversionRequest: RasterConversionRequest?
 
     @State private var cropDraftWidth = ""
     @State private var cropDraftHeight = ""
@@ -23,6 +25,13 @@ struct ContentView: View {
     @State private var resizeDraftWidth = ""
     @State private var resizeDraftHeight = ""
     @State private var resizeDraftLock = true
+    @State private var resizeDraftEditedDimension: AspectRatioResize.EditedDimension = .width
+    @State private var suppressResizeAspectSync = false
+    @State private var rasterConversionDraftWidth = ""
+    @State private var rasterConversionDraftHeight = ""
+    @State private var rasterConversionDraftLock = true
+    @State private var rasterConversionEditedDimension: AspectRatioResize.EditedDimension = .width
+    @State private var suppressRasterConversionAspectSync = false
 
     @State private var dismissedProcessedItemIDs: Set<UUID> = []
     @State private var punchSession: PunchSession?
@@ -31,6 +40,10 @@ struct ContentView: View {
     @State private var activeFolderPunch: FolderDropSession?
     @State private var expandedFolderIDs: Set<UUID> = []
     @State private var dropValidationState: DropValidationState = .idle
+    @State private var dropOverlayResetTask: Task<Void, Never>?
+    @State private var backgroundRemovalRunning = false
+    @State private var backgroundRemovalProgressMessage: String?
+    @State private var backgroundRemovalErrorMessage: String?
 
     private var isEmptyState: Bool {
         visibleProcessedItems.isEmpty && folderSessionFiles.isEmpty && activeFolderPunch == nil && !model.isQueueRunning
@@ -89,9 +102,9 @@ struct ContentView: View {
 
             appSurface
 
-            if model.isDropTargeted {
-                dragOverlay
-            }
+            dragOverlay
+                .opacity(model.isDropTargeted ? 1 : 0)
+                .accessibilityHidden(!model.isDropTargeted)
         }
         .frame(minWidth: 980, minHeight: 700)
         .background(WindowAppearanceConfigurator(opacity: windowOpacity))
@@ -99,7 +112,8 @@ struct ContentView: View {
             of: [UTType.fileURL.identifier],
             delegate: FileDropDelegate(
                 model: model,
-                validationState: $dropValidationState
+                markDropTargeted: markDropTargeted,
+                clearDropTargeting: clearDropTargeting
             )
         )
         .onAppear {
@@ -109,6 +123,12 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .pixelCrusherOpenFiles)) { notification in
             _ = notification
             consumeExternalOpenFiles()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            clearDropTargeting()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
+            clearDropTargeting()
         }
         .onChange(of: model.activeItemID) { _ in
             syncPunchSession()
@@ -124,11 +144,6 @@ struct ContentView: View {
                 Button("Update") {
                     showUpdateSheet = true
                 }
-
-                Toggle("Autocrop", isOn: $model.autoTrimTransparentBorders)
-                    .toggleStyle(.checkbox)
-                    .controlSize(.small)
-                    .help("Trim transparent borders automatically during processing")
 
                 Picker("Profile", selection: $profile) {
                     ForEach(CompressionProfile.allCases, id: \.self) { value in
@@ -164,16 +179,221 @@ struct ContentView: View {
         .sheet(item: $resizeTarget) { result in
             resizeSheet(for: result)
         }
+        .sheet(item: $backgroundRemovalTarget) { result in
+            backgroundRemovalSheet(for: result)
+        }
+        .sheet(item: $rasterConversionRequest) { request in
+            rasterConversionSheet(for: request)
+        }
     }
 
     private var appSurface: some View {
-        VStack(spacing: 0) {
-            mainPane
+        HSplitView {
+            automationSidebar
+                .frame(minWidth: 280, idealWidth: 320, maxWidth: 380)
 
-            if showBottomHint {
-                bottomHintBar
+            VStack(spacing: 0) {
+                mainPane
+
+                if showBottomHint {
+                    bottomHintBar
+                }
+            }
+            .frame(minWidth: 640)
+        }
+    }
+
+    private var automationSidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "waveform.path.ecg")
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 28)
+
+                Text("Automations")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.92) : Color.primary)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 18)
+
+            Divider().opacity(0.55)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Build a chain of actions. Dropped images run through these steps and save one final output.")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(4)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    VStack(spacing: 10) {
+                        ForEach(Array(model.automationActions.enumerated()), id: \.element.id) { index, action in
+                            automationActionCard(action, index: index)
+                        }
+
+                        addAutomationMenu
+                    }
+                }
+                .padding(18)
             }
         }
+        .background(
+            Color(nsColor: colorScheme == .dark
+                ? NSColor(calibratedWhite: 0.10, alpha: 0.92)
+                : NSColor(calibratedWhite: 0.95, alpha: 0.92)
+            )
+        )
+        .overlay(alignment: .trailing) {
+            Divider().opacity(0.55)
+        }
+    }
+
+    private func automationActionCard(_ action: AutomationActionKind, index: Int) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: action.symbolName)
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(action == .compression ? Color.accentColor : .secondary)
+                    .frame(width: 34, height: 34)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(Color.white.opacity(colorScheme == .dark ? 0.05 : 0.55))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(Color.secondary.opacity(0.22), lineWidth: 1)
+                    )
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(action.title)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.9) : Color.primary)
+                    Text(action.subtitle)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 4)
+
+                automationActionControls(action, index: index)
+            }
+
+            automationActionSettings(action)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(nsColor: colorScheme == .dark
+                    ? NSColor(calibratedWhite: 0.16, alpha: 0.92)
+                    : NSColor(calibratedWhite: 1.0, alpha: 0.85)
+                ))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.secondary.opacity(0.22), lineWidth: 1)
+        )
+    }
+
+    private func automationActionControls(_ action: AutomationActionKind, index: Int) -> some View {
+        HStack(spacing: 2) {
+            Button {
+                model.moveAutomationAction(action, direction: -1)
+            } label: {
+                Image(systemName: "chevron.up")
+            }
+            .buttonStyle(.borderless)
+            .disabled(index == 0)
+            .help("Move up")
+
+            Button {
+                model.moveAutomationAction(action, direction: 1)
+            } label: {
+                Image(systemName: "chevron.down")
+            }
+            .buttonStyle(.borderless)
+            .disabled(index == model.automationActions.count - 1)
+            .help("Move down")
+
+            if action.canRemove {
+                Button {
+                    model.removeAutomationAction(action)
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .help("Remove action")
+            }
+        }
+        .controlSize(.small)
+        .imageScale(.small)
+    }
+
+    @ViewBuilder
+    private func automationActionSettings(_ action: AutomationActionKind) -> some View {
+        switch action {
+        case .compression:
+            EmptyView()
+        case .removeBackground:
+            Picker("Model", selection: $model.selectedBackgroundRemovalModel) {
+                ForEach(BackgroundRemovalModelVariant.allCases, id: \.self) { modelVariant in
+                    Text(modelVariant.displayName).tag(modelVariant)
+                }
+            }
+            .pickerStyle(.menu)
+            .controlSize(.small)
+        case .resize:
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("Resize by max side", isOn: $model.autoResizeLongestSideEnabled)
+                    .toggleStyle(.checkbox)
+                HStack(spacing: 8) {
+                    Text("Max side")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("1024", text: $model.autoResizeLongestSide)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 82)
+                    Text("px")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .disabled(!model.autoResizeLongestSideEnabled)
+            }
+            .controlSize(.small)
+        case .convertFormat:
+            Picker("Format", selection: $model.autoConvertOutputFormat) {
+                Text("Keep original").tag(Optional<OutputImageFormat>.none)
+                ForEach(OutputImageFormat.allCases, id: \.self) { format in
+                    Text(format.displayName).tag(Optional(format))
+                }
+            }
+            .pickerStyle(.menu)
+            .controlSize(.small)
+        case .trimTransparentBorders:
+            Toggle("Trim transparent borders", isOn: $model.autoTrimTransparentBorders)
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
+        }
+    }
+
+    private var addAutomationMenu: some View {
+        Menu {
+            ForEach(model.availableAutomationActions) { action in
+                Button {
+                    model.addAutomationAction(action)
+                } label: {
+                    Label(action.title, systemImage: action.symbolName)
+                }
+            }
+        } label: {
+            Label("Add Action", systemImage: "plus")
+                .font(.system(size: 14, weight: .semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+        }
+        .buttonStyle(.bordered)
+        .disabled(model.availableAutomationActions.isEmpty)
     }
 
     private var mainPane: some View {
@@ -449,6 +669,7 @@ struct ContentView: View {
     private func folderFileRow(for result: ProcessingResult) -> some View {
         let previewURL = processingSourceURL(for: result)
         let conversionTargets = model.availableConversionFormats(for: previewURL)
+        let supportsBackgroundRemoval = result.state == .done && model.supportsBackgroundRemoval(for: previewURL)
         let isTerminal = result.state.isTerminal
         let progress = progress(for: result.state)
 
@@ -520,6 +741,10 @@ struct ContentView: View {
                             beginResize(for: result)
                         }
 
+                        if supportsBackgroundRemoval {
+                            backgroundRemovalActionButton(for: result)
+                        }
+
                         if !conversionTargets.isEmpty {
                             conversionActionMenu(sourceURL: previewURL, targets: conversionTargets)
                         }
@@ -557,6 +782,7 @@ struct ContentView: View {
     private func resultRow(for result: ProcessingResult) -> some View {
         let previewURL = processingSourceURL(for: result)
         let conversionTargets = model.availableConversionFormats(for: previewURL)
+        let supportsBackgroundRemoval = result.state == .done && model.supportsBackgroundRemoval(for: previewURL)
 
         return HStack(alignment: .center, spacing: 14) {
             ResultThumbnail(url: previewURL)
@@ -609,6 +835,10 @@ struct ContentView: View {
 
                 actionGlyphButton(symbol: "arrow.up.left.and.arrow.down.right", help: "Resize image") {
                     beginResize(for: result)
+                }
+
+                if supportsBackgroundRemoval {
+                    backgroundRemovalActionButton(for: result)
                 }
 
                 if !conversionTargets.isEmpty {
@@ -743,7 +973,7 @@ struct ContentView: View {
         Menu {
             ForEach(targets, id: \.self) { format in
                 Button("Convert to \(format.displayName)") {
-                    model.enqueueConvertedImage(sourceURL: sourceURL, to: format)
+                    beginConversion(from: sourceURL, to: format)
                 }
             }
         } label: {
@@ -765,6 +995,16 @@ struct ContentView: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help("Convert image format")
+    }
+
+    private func backgroundRemovalActionButton(for result: ProcessingResult) -> some View {
+        actionGlyphButton(symbol: "wand.and.rays", help: "Remove background") {
+            backgroundRemovalProgressMessage = nil
+            backgroundRemovalErrorMessage = nil
+            backgroundRemovalRunning = false
+            backgroundRemovalTarget = result
+        }
+        .disabled(model.isBackgroundRemovalBusy)
     }
 
     private var dragOverlay: some View {
@@ -800,6 +1040,28 @@ struct ContentView: View {
             )
             .padding(30)
             .allowsHitTesting(false)
+    }
+
+    private func markDropTargeted(_ validationState: DropValidationState) {
+        dropOverlayResetTask?.cancel()
+        dropValidationState = validationState
+        model.isDropTargeted = true
+        dropOverlayResetTask = Task {
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                dropOverlayResetTask = nil
+                model.isDropTargeted = false
+                dropValidationState = .idle
+            }
+        }
+    }
+
+    private func clearDropTargeting() {
+        dropOverlayResetTask?.cancel()
+        dropOverlayResetTask = nil
+        model.isDropTargeted = false
+        dropValidationState = .idle
     }
 
     private func applyProfile(_ profile: CompressionProfile) {
@@ -855,6 +1117,8 @@ struct ContentView: View {
     private func beginResize(for result: ProcessingResult) {
         resizeTarget = result
         resizeDraftLock = true
+        resizeDraftEditedDimension = .width
+        suppressResizeAspectSync = false
 
         guard let sourceSize = PixelCrusherImageLoader.orientedPixelSize(from: processingSourceURL(for: result)) else {
             resizeDraftWidth = ""
@@ -864,6 +1128,27 @@ struct ContentView: View {
 
         resizeDraftWidth = String(Int(sourceSize.width.rounded()))
         resizeDraftHeight = String(Int(sourceSize.height.rounded()))
+    }
+
+    private func beginConversion(from sourceURL: URL, to targetFormat: OutputImageFormat) {
+        guard sourceURL.pathExtension.caseInsensitiveCompare("svg") == .orderedSame else {
+            model.enqueueConvertedImage(sourceURL: sourceURL, to: targetFormat)
+            return
+        }
+
+        rasterConversionRequest = RasterConversionRequest(sourceURL: sourceURL, targetFormat: targetFormat)
+        rasterConversionDraftLock = true
+        rasterConversionEditedDimension = .width
+        suppressRasterConversionAspectSync = false
+
+        guard let sourceSize = PixelCrusherImageLoader.orientedPixelSize(from: sourceURL) else {
+            rasterConversionDraftWidth = ""
+            rasterConversionDraftHeight = ""
+            return
+        }
+
+        rasterConversionDraftWidth = String(Int(sourceSize.width.rounded()))
+        rasterConversionDraftHeight = String(Int(sourceSize.height.rounded()))
     }
 
     private func processingSourceURL(for result: ProcessingResult) -> URL {
@@ -948,11 +1233,23 @@ struct ContentView: View {
             HStack {
                 TextField("Width", text: $resizeDraftWidth)
                     .textFieldStyle(.roundedBorder)
+                    .onChange(of: resizeDraftWidth) { _ in
+                        syncResizeDraft(for: .width)
+                    }
                 TextField("Height", text: $resizeDraftHeight)
                     .textFieldStyle(.roundedBorder)
+                    .onChange(of: resizeDraftHeight) { _ in
+                        syncResizeDraft(for: .height)
+                    }
             }
 
             Toggle("Lock aspect ratio", isOn: $resizeDraftLock)
+                .onChange(of: resizeDraftLock) { isLocked in
+                    guard isLocked else {
+                        return
+                    }
+                    syncResizeDraft(for: resizeDraftEditedDimension)
+                }
 
             HStack {
                 Spacer()
@@ -969,6 +1266,81 @@ struct ContentView: View {
         .frame(width: 360)
     }
 
+    private func backgroundRemovalSheet(for result: ProcessingResult) -> some View {
+        let sourceURL = processingSourceURL(for: result)
+        return BackgroundRemovalSheet(
+            sourceURL: sourceURL,
+            modelStatuses: model.backgroundRemovalStatuses(),
+            selectedModel: $model.selectedBackgroundRemovalModel,
+            isRunning: backgroundRemovalRunning,
+            progressMessage: backgroundRemovalProgressMessage,
+            errorMessage: backgroundRemovalErrorMessage,
+            onCancel: {
+                guard !backgroundRemovalRunning else {
+                    return
+                }
+                backgroundRemovalTarget = nil
+            },
+            onDownloadModel: { modelVariant in
+                downloadBackgroundRemovalModel(modelVariant)
+            },
+            onQuickRemove: {
+                startBackgroundRemoval(for: result, modelVariant: model.selectedBackgroundRemovalModel, focusRect: nil)
+            },
+            onFocusedRemove: { focusRect in
+                startBackgroundRemoval(for: result, modelVariant: model.selectedBackgroundRemovalModel, focusRect: focusRect)
+            }
+        )
+    }
+
+    private func rasterConversionSheet(for request: RasterConversionRequest) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Export SVG as \(request.targetFormat.displayName)")
+                .font(.headline)
+            Text(request.sourceURL.lastPathComponent)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                TextField("Width", text: $rasterConversionDraftWidth)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: rasterConversionDraftWidth) { _ in
+                        syncRasterConversionDraft(for: .width)
+                    }
+                TextField("Height", text: $rasterConversionDraftHeight)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: rasterConversionDraftHeight) { _ in
+                        syncRasterConversionDraft(for: .height)
+                    }
+            }
+
+            Toggle("Lock aspect ratio", isOn: $rasterConversionDraftLock)
+                .onChange(of: rasterConversionDraftLock) { isLocked in
+                    guard isLocked else {
+                        return
+                    }
+                    syncRasterConversionDraft(for: rasterConversionEditedDimension)
+                }
+
+            Text("Set the raster export resolution before converting the SVG.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    rasterConversionRequest = nil
+                }
+                Button("Convert") {
+                    applyRasterConversionDraft(for: request)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(18)
+        .frame(width: 380)
+    }
+
     private func applyResizeDraft(for result: ProcessingResult) {
         let sourceURL = processingSourceURL(for: result)
         let parsedWidth = Int(resizeDraftWidth)
@@ -978,7 +1350,8 @@ struct ContentView: View {
             width: parsedWidth,
             height: parsedHeight,
             lockAspectRatio: resizeDraftLock,
-            sourceSize: PixelCrusherImageLoader.orientedPixelSize(from: sourceURL)
+            sourceSize: PixelCrusherImageLoader.orientedPixelSize(from: sourceURL),
+            editedDimension: resizeDraftLock ? resizeDraftEditedDimension : nil
         )
 
         if parsedWidth == nil, let computedWidth = resolved.width {
@@ -998,5 +1371,201 @@ struct ContentView: View {
 
         model.enqueueResizedImage(sourceURL: sourceURL, width: width, height: height)
         resizeTarget = nil
+    }
+
+    private func applyRasterConversionDraft(for request: RasterConversionRequest) {
+        let parsedWidth = Int(rasterConversionDraftWidth)
+        let parsedHeight = Int(rasterConversionDraftHeight)
+
+        let resolved = AspectRatioResize.resolve(
+            width: parsedWidth,
+            height: parsedHeight,
+            lockAspectRatio: rasterConversionDraftLock,
+            sourceSize: PixelCrusherImageLoader.orientedPixelSize(from: request.sourceURL),
+            editedDimension: rasterConversionDraftLock ? rasterConversionEditedDimension : nil
+        )
+
+        if parsedWidth == nil, let computedWidth = resolved.width {
+            rasterConversionDraftWidth = String(computedWidth)
+        }
+
+        if parsedHeight == nil, let computedHeight = resolved.height {
+            rasterConversionDraftHeight = String(computedHeight)
+        }
+
+        guard let width = resolved.width,
+              let height = resolved.height,
+              width > 0,
+              height > 0,
+              let rasterSize = try? CropSize(width: width, height: height) else {
+            return
+        }
+
+        model.enqueueConvertedImage(
+            sourceURL: request.sourceURL,
+            to: request.targetFormat,
+            rasterSize: rasterSize
+        )
+        rasterConversionRequest = nil
+    }
+
+    private func syncResizeDraft(for editedDimension: AspectRatioResize.EditedDimension) {
+        if suppressResizeAspectSync {
+            suppressResizeAspectSync = false
+            return
+        }
+
+        resizeDraftEditedDimension = editedDimension
+        guard resizeDraftLock,
+              let result = resizeTarget else {
+            return
+        }
+
+        let sourceURL = processingSourceURL(for: result)
+        let resolved = AspectRatioResize.resolve(
+            width: Int(resizeDraftWidth),
+            height: Int(resizeDraftHeight),
+            lockAspectRatio: true,
+            sourceSize: PixelCrusherImageLoader.orientedPixelSize(from: sourceURL),
+            editedDimension: editedDimension
+        )
+
+        switch editedDimension {
+        case .width:
+            guard let height = resolved.height else {
+                return
+            }
+            let heightText = String(height)
+            guard heightText != resizeDraftHeight else {
+                return
+            }
+            suppressResizeAspectSync = true
+            resizeDraftHeight = heightText
+        case .height:
+            guard let width = resolved.width else {
+                return
+            }
+            let widthText = String(width)
+            guard widthText != resizeDraftWidth else {
+                return
+            }
+            suppressResizeAspectSync = true
+            resizeDraftWidth = widthText
+        }
+    }
+
+    private func syncRasterConversionDraft(for editedDimension: AspectRatioResize.EditedDimension) {
+        if suppressRasterConversionAspectSync {
+            suppressRasterConversionAspectSync = false
+            return
+        }
+
+        rasterConversionEditedDimension = editedDimension
+        guard rasterConversionDraftLock,
+              let request = rasterConversionRequest else {
+            return
+        }
+
+        let resolved = AspectRatioResize.resolve(
+            width: Int(rasterConversionDraftWidth),
+            height: Int(rasterConversionDraftHeight),
+            lockAspectRatio: true,
+            sourceSize: PixelCrusherImageLoader.orientedPixelSize(from: request.sourceURL),
+            editedDimension: editedDimension
+        )
+
+        switch editedDimension {
+        case .width:
+            guard let height = resolved.height else {
+                return
+            }
+            let heightText = String(height)
+            guard heightText != rasterConversionDraftHeight else {
+                return
+            }
+            suppressRasterConversionAspectSync = true
+            rasterConversionDraftHeight = heightText
+        case .height:
+            guard let width = resolved.width else {
+                return
+            }
+            let widthText = String(width)
+            guard widthText != rasterConversionDraftWidth else {
+                return
+            }
+            suppressRasterConversionAspectSync = true
+            rasterConversionDraftWidth = widthText
+        }
+    }
+
+    private func startBackgroundRemoval(
+        for result: ProcessingResult,
+        modelVariant: BackgroundRemovalModelVariant,
+        focusRect: CGRect?
+    ) {
+        guard !backgroundRemovalRunning else {
+            return
+        }
+
+        backgroundRemovalRunning = true
+        backgroundRemovalErrorMessage = nil
+        backgroundRemovalProgressMessage = "Preparing background removal"
+
+        let sourceURL = processingSourceURL(for: result)
+        Task {
+            do {
+                _ = try await model.removeBackground(
+                    from: sourceURL,
+                    modelVariant: modelVariant,
+                    focusRect: focusRect
+                ) { update in
+                    Task { @MainActor in
+                        backgroundRemovalProgressMessage = update.message
+                    }
+                }
+
+                backgroundRemovalRunning = false
+                backgroundRemovalProgressMessage = nil
+                backgroundRemovalTarget = nil
+            } catch {
+                backgroundRemovalRunning = false
+                backgroundRemovalErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func downloadBackgroundRemovalModel(_ modelVariant: BackgroundRemovalModelVariant) {
+        guard !backgroundRemovalRunning else {
+            return
+        }
+
+        backgroundRemovalRunning = true
+        backgroundRemovalErrorMessage = nil
+        backgroundRemovalProgressMessage = "Preparing model download"
+
+        Task {
+            do {
+                try await model.downloadBackgroundRemovalModel(modelVariant) { update in
+                    Task { @MainActor in
+                        backgroundRemovalProgressMessage = update.message
+                    }
+                }
+
+                backgroundRemovalRunning = false
+                backgroundRemovalProgressMessage = nil
+            } catch {
+                backgroundRemovalRunning = false
+                backgroundRemovalErrorMessage = error.localizedDescription
+            }
+        }
+    }
+}
+
+private struct RasterConversionRequest: Identifiable {
+    let sourceURL: URL
+    let targetFormat: OutputImageFormat
+
+    var id: String {
+        "\(sourceURL.path)::\(targetFormat.rawValue)"
     }
 }

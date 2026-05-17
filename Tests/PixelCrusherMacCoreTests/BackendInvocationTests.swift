@@ -188,6 +188,62 @@ exit 1
         #expect(options?["output_format"] as? String == "jpeg")
     }
 
+    @Test("Backend request encodes raster export size for format conversion")
+    func encodesRasterConversionSize() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("pixelcrusher-raster-conversion-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let outputPath = tempDir.appendingPathComponent("out.png").path
+        let requestPath = tempDir.appendingPathComponent("request.json").path
+        let cliScript = tempDir.appendingPathComponent("fake-pixelcrusher-cli")
+
+        try """
+#!/bin/sh
+set -e
+cmd="$1"
+if [ "$cmd" = "diagnostics" ]; then
+  echo '[]'
+  exit 0
+fi
+if [ "$cmd" = "process" ]; then
+  cat > "\(requestPath)"
+  echo '{"event":"finished","payload":{"success":true,"report":{"source_path":"/tmp/input.svg","destination_path":"\(outputPath)","asset_format":"png","input_bytes":100,"output_bytes":90,"elapsed_ms":11,"applied_stages":["pngquant"]},"error":null}}'
+  exit 0
+fi
+exit 1
+""".write(to: cliScript, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cliScript.path)
+
+        let inputFile = tempDir.appendingPathComponent("input.svg")
+        try Data("<svg viewBox='0 0 10 10'></svg>".utf8).write(to: inputFile)
+
+        let client = PixelCrusherBackendClient(
+            cliExecutableURL: cliScript,
+            environment: ProcessInfo.processInfo.environment,
+            bundledToolsDirectory: nil,
+            outputDirectory: tempDir
+        )
+
+        _ = try client.processImage(
+            at: inputFile,
+            options: ImageProcessingOptions(
+                autoTrimTransparentBorders: false,
+                fixedResizeSize: try CropSize(width: 2048, height: 2048),
+                outputFormat: .png
+            )
+        )
+
+        let requestData = try #require(FileManager.default.contents(atPath: requestPath))
+        let json = try JSONSerialization.jsonObject(with: requestData) as? [String: Any]
+        let options = json?["options"] as? [String: Any]
+        let transform = options?["transform"] as? [String: Any]
+
+        #expect(transform?["resize_width"] as? Int == 2048)
+        #expect(transform?["resize_height"] as? Int == 2048)
+        #expect(options?["output_format"] as? String == "png")
+    }
+
     @Test("Per-call output directory override is encoded in backend request")
     func processImageUsesPerCallOutputDirectoryOverride() throws {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("pixelcrusher-output-override-\(UUID().uuidString)", isDirectory: true)

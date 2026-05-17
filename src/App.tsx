@@ -160,7 +160,7 @@ function App() {
         className="hidden"
         ref={fileInputRef}
         onChange={onChooseFiles}
-        accept=".png,.jpg,.jpeg,.svg,.gif"
+        accept=".png,.jpg,.jpeg,.svg,.gif,.webp"
       />
 
       {showUpdateSheet && (

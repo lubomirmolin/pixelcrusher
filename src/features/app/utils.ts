@@ -81,6 +81,8 @@ export function mimeTypeForPath(path: string): string {
       return 'image/gif';
     case 'svg':
       return 'image/svg+xml';
+    case 'webp':
+      return 'image/webp';
     default:
       return 'application/octet-stream';
   }

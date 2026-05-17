@@ -41,4 +41,32 @@ struct AspectRatioResizeTests {
         #expect(resolved.width == nil)
         #expect(resolved.height == 400)
     }
+
+    @Test("Editing width recomputes height when aspect lock is enabled")
+    func recomputesHeightFromEditedWidth() {
+        let resolved = AspectRatioResize.resolve(
+            width: 183,
+            height: 62,
+            lockAspectRatio: true,
+            sourceSize: CGSize(width: 1000, height: 250),
+            editedDimension: .width
+        )
+
+        #expect(resolved.width == 183)
+        #expect(resolved.height == 46)
+    }
+
+    @Test("Editing height recomputes width when aspect lock is enabled")
+    func recomputesWidthFromEditedHeight() {
+        let resolved = AspectRatioResize.resolve(
+            width: 183,
+            height: 90,
+            lockAspectRatio: true,
+            sourceSize: CGSize(width: 1000, height: 250),
+            editedDimension: .height
+        )
+
+        #expect(resolved.width == 360)
+        #expect(resolved.height == 90)
+    }
 }

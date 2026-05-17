@@ -14,6 +14,6 @@ struct SupportedAssetFormatsTests {
     func detectsSupportedExtensionIgnoringCase() {
         #expect(SupportedAssetFormats.isSupportedImageExtension("SVG"))
         #expect(SupportedAssetFormats.isSupportedImageExtension("gif"))
-        #expect(!SupportedAssetFormats.isSupportedImageExtension("webp"))
+        #expect(SupportedAssetFormats.isSupportedImageExtension("webp"))
     }
 }

@@ -3,6 +3,7 @@ import AppKit
 import Foundation
 import ImageIO
 import CoreImage
+import QuickLookThumbnailing
 import PixelCrusherMacCore
 
 struct PunchSession: Equatable {
@@ -523,6 +524,10 @@ private final class PunchColorSampler {
 
 enum PixelCrusherImageLoader {
     static func orientedPixelSize(from url: URL) -> CGSize? {
+        if isSVG(url) {
+            return SVGDocumentMetrics.canvasSize(from: url)
+        }
+
         guard let cgImage = orientedCGImage(from: url) else {
             return nil
         }
@@ -530,6 +535,17 @@ enum PixelCrusherImageLoader {
     }
 
     static func orientedNSImage(from url: URL) -> NSImage? {
+        if isSVG(url) {
+            guard let cgImage = renderedSVGCGImage(from: url) else {
+                return nil
+            }
+
+            return NSImage(
+                cgImage: cgImage,
+                size: NSSize(width: cgImage.width, height: cgImage.height)
+            )
+        }
+
         guard let cgImage = orientedCGImage(from: url) else {
             return nil
         }
@@ -537,6 +553,10 @@ enum PixelCrusherImageLoader {
     }
 
     static func orientedCGImage(from url: URL) -> CGImage? {
+        if isSVG(url) {
+            return renderedSVGCGImage(from: url)
+        }
+
         guard let data = try? Data(contentsOf: url),
               let source = CGImageSourceCreateWithData(data as CFData, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
@@ -554,5 +574,49 @@ enum PixelCrusherImageLoader {
         let ciImage = CIImage(cgImage: image).oriented(orientation)
         let ciContext = CIContext(options: nil)
         return ciContext.createCGImage(ciImage, from: ciImage.extent)
+    }
+
+    private static func isSVG(_ url: URL) -> Bool {
+        url.pathExtension.caseInsensitiveCompare("svg") == .orderedSame
+    }
+
+    private static func renderedSVGCGImage(from url: URL) -> CGImage? {
+        let sourceSize = SVGDocumentMetrics.canvasSize(from: url) ?? CGSize(width: 1024, height: 1024)
+        let longestEdge = max(max(sourceSize.width, sourceSize.height), 256)
+        let maxDimension = min(longestEdge, 2048)
+        let request = QLThumbnailGenerator.Request(
+            fileAt: url,
+            size: CGSize(width: maxDimension, height: maxDimension),
+            scale: NSScreen.main?.backingScaleFactor ?? 2.0,
+            representationTypes: .thumbnail
+        )
+
+        let semaphore = DispatchSemaphore(value: 0)
+        let rendered = RenderedThumbnailBox()
+
+        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { thumbnail, _ in
+            rendered.store(thumbnail?.cgImage)
+            semaphore.signal()
+        }
+
+        _ = semaphore.wait(timeout: .now() + 5)
+        return rendered.load()
+    }
+}
+
+private final class RenderedThumbnailBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var image: CGImage?
+
+    func store(_ image: CGImage?) {
+        lock.lock()
+        self.image = image
+        lock.unlock()
+    }
+
+    func load() -> CGImage? {
+        lock.lock()
+        defer { lock.unlock() }
+        return image
     }
 }

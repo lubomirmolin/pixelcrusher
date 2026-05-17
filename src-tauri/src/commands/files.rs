@@ -9,7 +9,7 @@ use crate::path_utils::is_supported_image_path;
 pub fn select_input_files() -> Vec<String> {
     FileDialog::new()
         .set_title("Select images to optimize")
-        .add_filter("Images", &["png", "jpg", "jpeg", "svg", "gif"])
+        .add_filter("Images", &["png", "jpg", "jpeg", "svg", "gif", "webp"])
         .pick_files()
         .unwrap_or_default()
         .into_iter()

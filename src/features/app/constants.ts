@@ -2,8 +2,8 @@ import type { CompressionProfileId, ProfilePreset } from './types';
 
 export const TERMINAL_JOB_STATUSES = new Set(['completed', 'failed']);
 
-export const SUPPORTED_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'svg', 'gif']);
-export const SUPPORTED_FORMATS_LABEL = 'PNG/JPG/JPEG/SVG/GIF';
+export const SUPPORTED_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'svg', 'gif', 'webp']);
+export const SUPPORTED_FORMATS_LABEL = 'PNG/JPG/JPEG/SVG/GIF/WEBP';
 
 export const ENQUEUE_DEDUPE_WINDOW_MS = 1000;
 

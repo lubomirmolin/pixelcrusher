@@ -1,6 +1,11 @@
 import CoreGraphics
 
 public enum AspectRatioResize {
+    public enum EditedDimension {
+        case width
+        case height
+    }
+
     /// Resolves a missing width/height while preserving the source aspect ratio.
     ///
     /// Behavior intentionally mirrors the macOS resize sheet implementation:
@@ -11,13 +16,31 @@ public enum AspectRatioResize {
         width: Int?,
         height: Int?,
         lockAspectRatio: Bool,
-        sourceSize: CGSize?
+        sourceSize: CGSize?,
+        editedDimension: EditedDimension? = nil
     ) -> (width: Int?, height: Int?) {
         guard lockAspectRatio,
               let sourceSize,
               sourceSize.width > 0,
               sourceSize.height > 0 else {
             return (width, height)
+        }
+
+        switch editedDimension {
+        case .width:
+            if let knownWidth = width,
+               knownWidth > 0 {
+                let computedHeight = max(1, Int((CGFloat(knownWidth) * sourceSize.height / sourceSize.width).rounded()))
+                return (width, computedHeight)
+            }
+        case .height:
+            if let knownHeight = height,
+               knownHeight > 0 {
+                let computedWidth = max(1, Int((CGFloat(knownHeight) * sourceSize.width / sourceSize.height).rounded()))
+                return (computedWidth, height)
+            }
+        case nil:
+            break
         }
 
         if width == nil,

@@ -5,3 +5,4 @@ pub mod model;
 pub mod optimizer;
 pub mod processing;
 pub mod queue;
+pub mod svg;

@@ -110,10 +110,27 @@ pub fn resize_image(img: DynamicImage, width: u32, height: u32) -> DynamicImage 
     img.resize_exact(width.max(1), height.max(1), FilterType::Lanczos3)
 }
 
+pub fn fit_with_max_longest_side(width: u32, height: u32, max_longest_side: u32) -> (u32, u32) {
+    let width = width.max(1);
+    let height = height.max(1);
+    let max_longest_side = max_longest_side.max(1);
+    let current_longest = width.max(height);
+
+    if current_longest <= max_longest_side {
+        return (width, height);
+    }
+
+    let scale = f64::from(max_longest_side) / f64::from(current_longest);
+    let next_width = (f64::from(width) * scale).round().max(1.0) as u32;
+    let next_height = (f64::from(height) * scale).round().max(1.0) as u32;
+    (next_width, next_height)
+}
+
 pub fn maybe_apply_crop_resize(
     mut image: DynamicImage,
     crop_box: Option<CropBox>,
     resize_dims: Option<(u32, u32)>,
+    resize_longest_side: Option<u32>,
 ) -> DynamicImage {
     if let Some(crop) = crop_box {
         image = crop_image(image, crop);
@@ -121,6 +138,10 @@ pub fn maybe_apply_crop_resize(
 
     if let Some((resize_w, resize_h)) = resize_dims {
         image = resize_image(image, resize_w, resize_h);
+    } else if let Some(max_longest_side) = resize_longest_side {
+        let (next_width, next_height) =
+            fit_with_max_longest_side(image.width(), image.height(), max_longest_side);
+        image = resize_image(image, next_width, next_height);
     }
 
     image

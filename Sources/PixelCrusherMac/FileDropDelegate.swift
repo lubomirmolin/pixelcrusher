@@ -4,32 +4,29 @@ import UniformTypeIdentifiers
 @MainActor
 struct FileDropDelegate: DropDelegate {
     let model: AppViewModel
-    @Binding var validationState: DropValidationState
+    let markDropTargeted: (DropValidationState) -> Void
+    let clearDropTargeting: () -> Void
 
     func validateDrop(info: DropInfo) -> Bool {
         info.hasItemsConforming(to: [UTType.fileURL.identifier])
     }
 
     func dropEntered(info: DropInfo) {
-        model.isDropTargeted = true
-        validationState = dropValidation(for: info)
+        markDropTargeted(dropValidation(for: info))
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        model.isDropTargeted = true
-        validationState = dropValidation(for: info)
+        markDropTargeted(dropValidation(for: info))
         return DropProposal(operation: .copy)
     }
 
     func dropExited(info: DropInfo) {
         _ = info
-        model.isDropTargeted = false
-        validationState = .idle
+        clearDropTargeting()
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        model.isDropTargeted = false
-        defer { validationState = .idle }
+        clearDropTargeting()
         let providers = info.itemProviders(for: [UTType.fileURL.identifier])
         guard !providers.isEmpty else {
             return false

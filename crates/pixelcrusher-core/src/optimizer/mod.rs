@@ -20,6 +20,7 @@ enum PipelineKind {
     Png,
     Svg,
     Gif,
+    Webp,
     Passthrough,
 }
 
@@ -176,6 +177,7 @@ pub fn optimize_asset(
                 applied_stages.push("copy".to_string());
             }
         }
+        PipelineKind::Webp => applied_stages.push("copy".to_string()),
         PipelineKind::Passthrough => applied_stages.push("copy".to_string()),
     }
 
@@ -188,6 +190,7 @@ fn pipeline_for_format(format: AssetFormat) -> PipelineKind {
         AssetFormat::Png => PipelineKind::Png,
         AssetFormat::Svg => PipelineKind::Svg,
         AssetFormat::Gif => PipelineKind::Gif,
+        AssetFormat::Webp => PipelineKind::Webp,
         AssetFormat::Unknown => PipelineKind::Passthrough,
     }
 }
@@ -210,6 +213,7 @@ mod tests {
         assert_eq!(pipeline_for_format(AssetFormat::Png), PipelineKind::Png);
         assert_eq!(pipeline_for_format(AssetFormat::Svg), PipelineKind::Svg);
         assert_eq!(pipeline_for_format(AssetFormat::Gif), PipelineKind::Gif);
+        assert_eq!(pipeline_for_format(AssetFormat::Webp), PipelineKind::Webp);
         assert_eq!(
             pipeline_for_format(AssetFormat::Unknown),
             PipelineKind::Passthrough

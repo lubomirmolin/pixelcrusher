@@ -8,6 +8,7 @@ pub enum AssetFormat {
     Png,
     Svg,
     Gif,
+    Webp,
     Unknown,
 }
 
@@ -18,6 +19,7 @@ impl AssetFormat {
             AssetFormat::Png => "png",
             AssetFormat::Svg => "svg",
             AssetFormat::Gif => "gif",
+            AssetFormat::Webp => "webp",
             AssetFormat::Unknown => "unknown",
         }
     }
@@ -28,6 +30,7 @@ impl AssetFormat {
             AssetFormat::Png => "png",
             AssetFormat::Svg => "svg",
             AssetFormat::Gif => "gif",
+            AssetFormat::Webp => "webp",
             AssetFormat::Unknown => "bin",
         }
     }
@@ -38,6 +41,7 @@ impl AssetFormat {
             "png" => Some(AssetFormat::Png),
             "gif" => Some(AssetFormat::Gif),
             "svg" => Some(AssetFormat::Svg),
+            "webp" => Some(AssetFormat::Webp),
             _ => None,
         }
     }
@@ -45,7 +49,7 @@ impl AssetFormat {
     pub fn is_raster(&self) -> bool {
         matches!(
             self,
-            AssetFormat::Png | AssetFormat::Jpeg | AssetFormat::Gif
+            AssetFormat::Png | AssetFormat::Jpeg | AssetFormat::Gif | AssetFormat::Webp
         )
     }
 }
@@ -72,6 +76,7 @@ pub fn detect_by_extension(path: &Path) -> Option<AssetFormat> {
         "png" => Some(AssetFormat::Png),
         "svg" => Some(AssetFormat::Svg),
         "gif" => Some(AssetFormat::Gif),
+        "webp" => Some(AssetFormat::Webp),
         _ => None,
     }
 }
@@ -87,6 +92,10 @@ pub fn detect_by_bytes(bytes: &[u8]) -> AssetFormat {
 
     if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
         return AssetFormat::Gif;
+    }
+
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return AssetFormat::Webp;
     }
 
     let ascii = String::from_utf8_lossy(bytes).to_lowercase();
@@ -139,6 +148,17 @@ mod tests {
             AssetFormat::from_output_format("svg"),
             Some(AssetFormat::Svg)
         );
-        assert_eq!(AssetFormat::from_output_format("webp"), None);
+        assert_eq!(
+            AssetFormat::from_output_format("webp"),
+            Some(AssetFormat::Webp)
+        );
+    }
+
+    #[test]
+    fn detects_webp_magic() {
+        assert_eq!(
+            detect_by_bytes(b"RIFF\x01\x02\x03\x04WEBPVP8 "),
+            AssetFormat::Webp
+        );
     }
 }

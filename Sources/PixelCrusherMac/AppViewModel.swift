@@ -4,6 +4,67 @@ import AppKit
 import UniformTypeIdentifiers
 import PixelCrusherMacCore
 
+enum AutomationActionKind: String, CaseIterable, Identifiable, Codable, Sendable {
+    case compression
+    case removeBackground
+    case resize
+    case convertFormat
+    case trimTransparentBorders
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .compression:
+            return "Compress Image"
+        case .removeBackground:
+            return "Remove Background"
+        case .resize:
+            return "Resize"
+        case .convertFormat:
+            return "Convert Format"
+        case .trimTransparentBorders:
+            return "Trim Transparent Edges"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .compression:
+            return "Optimize size and quality"
+        case .removeBackground:
+            return "Isolate main subject"
+        case .resize:
+            return "Scale to target dimensions"
+        case .convertFormat:
+            return "Save in another format"
+        case .trimTransparentBorders:
+            return "Remove empty alpha bounds"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .compression:
+            return "doc.zipper"
+        case .removeBackground:
+            return "wand.and.rays"
+        case .resize:
+            return "arrow.up.left.and.arrow.down.right"
+        case .convertFormat:
+            return "arrow.triangle.2.circlepath"
+        case .trimTransparentBorders:
+            return "crop"
+        }
+    }
+
+    var canRemove: Bool {
+        self != .compression
+    }
+
+    static let defaultChain: [AutomationActionKind] = [.compression]
+}
+
 @MainActor
 final class AppViewModel: ObservableObject {
     private enum DefaultsKey {
@@ -18,6 +79,11 @@ final class AppViewModel: ObservableObject {
         static let fixedResizeEnabled = "fixedResizeEnabled"
         static let fixedResizeWidth = "fixedResizeWidth"
         static let fixedResizeHeight = "fixedResizeHeight"
+        static let autoResizeLongestSideEnabled = "autoResizeLongestSideEnabled"
+        static let autoResizeLongestSide = "autoResizeLongestSide"
+        static let autoConvertOutputFormat = "autoConvertOutputFormat"
+        static let automationActionOrder = "automationActionOrder"
+        static let backgroundRemovalModel = "backgroundRemovalModel"
 
         static let jpegQualityPercent = "jpegQualityPercent"
 
@@ -38,12 +104,14 @@ final class AppViewModel: ObservableObject {
     private let defaults: UserDefaults
     private let backendClient: PixelCrusherBackendClient
     private let processor: ImageProcessor
+    private let backgroundRemovalClient: BackgroundRemovalClient
     nonisolated static let supportedFormatsLabel = SupportedAssetFormats.imageFormatsLabel
     nonisolated static let supportedImageUTTypes: [UTType] = [
         .png,
         .jpeg,
         .gif,
-        UTType(filenameExtension: "svg")
+        UTType(filenameExtension: "svg"),
+        UTType(filenameExtension: "webp")
     ].compactMap { $0 }
     nonisolated static let supportedImageTypeIdentifiers: [String] = supportedImageUTTypes.map(\.identifier)
     nonisolated static let folderTypeIdentifiers: [String] = [UTType.folder.identifier]
@@ -90,6 +158,26 @@ final class AppViewModel: ObservableObject {
 
     @Published var fixedResizeHeight: String {
         didSet { defaults.set(fixedResizeHeight, forKey: DefaultsKey.fixedResizeHeight) }
+    }
+
+    @Published var autoResizeLongestSideEnabled: Bool {
+        didSet { defaults.set(autoResizeLongestSideEnabled, forKey: DefaultsKey.autoResizeLongestSideEnabled) }
+    }
+
+    @Published var autoResizeLongestSide: String {
+        didSet { defaults.set(autoResizeLongestSide, forKey: DefaultsKey.autoResizeLongestSide) }
+    }
+
+    @Published var autoConvertOutputFormat: OutputImageFormat? {
+        didSet { defaults.set(autoConvertOutputFormat?.rawValue, forKey: DefaultsKey.autoConvertOutputFormat) }
+    }
+
+    @Published var automationActions: [AutomationActionKind] {
+        didSet { persistAutomationActions() }
+    }
+
+    @Published var selectedBackgroundRemovalModel: BackgroundRemovalModelVariant {
+        didSet { defaults.set(selectedBackgroundRemovalModel.rawValue, forKey: DefaultsKey.backgroundRemovalModel) }
     }
 
     @Published var jpegQualityPercent: Double {
@@ -148,11 +236,13 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var activeItemName: String?
     @Published private(set) var isQueueRunning = false
     @Published private(set) var toolStatuses: [OptimizerToolStatus] = []
+    @Published private(set) var isBackgroundRemovalBusy = false
 
     private var queueStateMachine = ProcessingQueueStateMachine()
     private var resultIndexByID: [UUID: Int] = [:]
     private var optionsOverrideByID: [UUID: ImageProcessingOptions] = [:]
     private var outputDirectoryOverrideByID: [UUID: URL] = [:]
+    private var automationActionsByID: [UUID: [AutomationActionKind]] = [:]
     private var queueWorkerTask: Task<Void, Never>?
     private var currentJobTasks: [UUID: Task<ImageProcessingReport, Error>] = [:]
     private var stopAfterCurrent = false
@@ -175,6 +265,10 @@ final class AppViewModel: ObservableObject {
         self.defaults = defaults
         self.backendClient = backendClient
         self.processor = ImageProcessor(backend: backendClient)
+        self.backgroundRemovalClient = BackgroundRemovalClient(
+            environment: ProcessInfo.processInfo.environment,
+            bundledToolsDirectory: OptimizerToolDetector.defaultBundledToolsDirectory(bundle: .main)
+        )
 
         overwriteOriginal = defaults.object(forKey: DefaultsKey.overwriteOriginal) as? Bool ?? false
         autoTrimTransparentBorders = defaults.object(forKey: DefaultsKey.autoTrimTransparentBorders) as? Bool ?? true
@@ -194,6 +288,20 @@ final class AppViewModel: ObservableObject {
         fixedResizeEnabled = persistedFixedResizeEnabled
         fixedResizeWidth = defaults.string(forKey: DefaultsKey.fixedResizeWidth) ?? ""
         fixedResizeHeight = defaults.string(forKey: DefaultsKey.fixedResizeHeight) ?? ""
+        autoResizeLongestSideEnabled = defaults.object(forKey: DefaultsKey.autoResizeLongestSideEnabled) as? Bool ?? false
+        autoResizeLongestSide = defaults.string(forKey: DefaultsKey.autoResizeLongestSide) ?? "1024"
+        if let persistedFormat = defaults.string(forKey: DefaultsKey.autoConvertOutputFormat) {
+            autoConvertOutputFormat = OutputImageFormat(rawValue: persistedFormat)
+        } else {
+            autoConvertOutputFormat = nil
+        }
+        automationActions = Self.persistedAutomationActions(defaults: defaults)
+        if let persistedBackgroundModel = defaults.string(forKey: DefaultsKey.backgroundRemovalModel),
+           let modelVariant = BackgroundRemovalModelVariant(rawValue: persistedBackgroundModel) {
+            selectedBackgroundRemovalModel = modelVariant
+        } else {
+            selectedBackgroundRemovalModel = .fast
+        }
 
         jpegQualityPercent = defaults.object(forKey: DefaultsKey.jpegQualityPercent) as? Double ?? 82
 
@@ -216,6 +324,113 @@ final class AppViewModel: ObservableObject {
         }
 
         refreshToolAvailability()
+    }
+
+    func backgroundRemovalStatuses() -> [BackgroundRemovalModelStatus] {
+        backgroundRemovalClient.statuses()
+    }
+
+    var availableAutomationActions: [AutomationActionKind] {
+        AutomationActionKind.allCases.filter { action in
+            action != .compression && !automationActions.contains(action)
+        }
+    }
+
+    func addAutomationAction(_ action: AutomationActionKind) {
+        guard action != .compression, !automationActions.contains(action) else {
+            return
+        }
+        automationActions.append(action)
+    }
+
+    func removeAutomationAction(_ action: AutomationActionKind) {
+        guard action.canRemove else {
+            return
+        }
+        automationActions.removeAll { $0 == action }
+        ensureCompressionAction()
+    }
+
+    func moveAutomationAction(_ action: AutomationActionKind, direction: Int) {
+        guard let sourceIndex = automationActions.firstIndex(of: action) else {
+            return
+        }
+
+        let targetIndex = sourceIndex + direction
+        guard automationActions.indices.contains(targetIndex) else {
+            return
+        }
+
+        automationActions.swapAt(sourceIndex, targetIndex)
+        ensureCompressionAction()
+    }
+
+    func downloadBackgroundRemovalModel(
+        _ modelVariant: BackgroundRemovalModelVariant,
+        progressHandler: @escaping @Sendable (BackgroundRemovalProgressUpdate) -> Void
+    ) async throws {
+        guard !isBackgroundRemovalBusy else {
+            throw BackgroundRemovalError.runtimeFailed("Background removal is already running.")
+        }
+
+        isBackgroundRemovalBusy = true
+        defer { isBackgroundRemovalBusy = false }
+
+        let client = backgroundRemovalClient
+        _ = try await Task.detached(priority: .userInitiated) {
+            try await client.downloadModel(
+                modelVariant,
+                progressHandler: progressHandler
+            )
+        }.value
+    }
+
+    func supportsBackgroundRemoval(for sourceURL: URL) -> Bool {
+        backgroundRemovalClient.supportsInputFile(sourceURL)
+    }
+
+    func removeBackground(
+        from sourceURL: URL,
+        modelVariant: BackgroundRemovalModelVariant,
+        focusRect: CGRect? = nil,
+        progressHandler: @escaping @Sendable (BackgroundRemovalProgressUpdate) -> Void
+    ) async throws -> ProcessingResult {
+        guard !isBackgroundRemovalBusy else {
+            throw BackgroundRemovalError.runtimeFailed("Background removal is already running.")
+        }
+
+        isBackgroundRemovalBusy = true
+        defer { isBackgroundRemovalBusy = false }
+
+        let client = backgroundRemovalClient
+        let optimizer = currentOptions(enabledActions: [.compression]).optimizer
+        let report = try await Task.detached(priority: .userInitiated) {
+            try await client.removeBackground(
+                from: sourceURL,
+                modelVariant: modelVariant,
+                focusRect: focusRect,
+                optimizer: optimizer,
+                progressHandler: progressHandler
+            )
+        }.value
+
+        let derivedResult = ProcessingResult(
+            id: UUID(),
+            inputURL: report.sourceURL,
+            enqueuedOrder: nextDerivedResultOrder(),
+            outputURL: report.outputURL,
+            inputBytes: report.inputBytes,
+            outputBytes: report.outputBytes,
+            success: true,
+            state: .done,
+            statusText: "Background removed",
+            detailText: report.summary,
+            warning: nil
+        )
+
+        results.append(derivedResult)
+        resultIndexByID[derivedResult.id] = results.count - 1
+        return derivedResult
     }
 
     func applyCompressionProfile(_ profile: CompressionProfile) {
@@ -323,7 +538,7 @@ final class AppViewModel: ObservableObject {
         }
 
         let cropOrigin = try? CropOrigin(x: max(0, x), y: max(0, y))
-        let options = currentOptions(manualCrop: (size: cropSize, origin: cropOrigin))
+        let options = currentOptions(manualCrop: (size: cropSize, origin: cropOrigin), enabledActions: [.compression])
         enqueueExternal(urls: [sourceURL], optionsOverride: options)
     }
 
@@ -332,12 +547,16 @@ final class AppViewModel: ObservableObject {
             return
         }
 
-        var options = currentOptions()
+        var options = currentOptions(enabledActions: [.compression])
         options.fixedResizeSize = resizeSize
         enqueueExternal(urls: [sourceURL], optionsOverride: options)
     }
 
     func availableConversionFormats(for sourceURL: URL) -> [OutputImageFormat] {
+        if sourceURL.pathExtension.caseInsensitiveCompare("svg") == .orderedSame {
+            return OutputImageFormat.allCases
+        }
+
         guard let sourceFormat = OutputImageFormat.fromPathExtension(sourceURL.pathExtension) else {
             return []
         }
@@ -346,13 +565,20 @@ final class AppViewModel: ObservableObject {
     }
 
     func enqueueConvertedImage(sourceURL: URL, to targetFormat: OutputImageFormat) {
-        guard let sourceFormat = OutputImageFormat.fromPathExtension(sourceURL.pathExtension),
-              sourceFormat != targetFormat else {
+        enqueueConvertedImage(sourceURL: sourceURL, to: targetFormat, rasterSize: nil)
+    }
+
+    func enqueueConvertedImage(sourceURL: URL, to targetFormat: OutputImageFormat, rasterSize: CropSize?) {
+        if let sourceFormat = OutputImageFormat.fromPathExtension(sourceURL.pathExtension),
+           sourceFormat == targetFormat {
             return
         }
 
-        var options = currentOptions()
+        var options = currentOptions(enabledActions: [.compression])
         options.outputFormat = targetFormat
+        if let rasterSize {
+            options.fixedResizeSize = rasterSize
+        }
         enqueueExternal(urls: [sourceURL], optionsOverride: options)
     }
 
@@ -377,6 +603,7 @@ final class AppViewModel: ObservableObject {
         for id in cancelledIDs {
             optionsOverrideByID[id] = nil
             outputDirectoryOverrideByID[id] = nil
+            automationActionsByID[id] = nil
             guard let index = resultIndexByID[id] else { continue }
             results[index].success = false
             results[index].state = .failed
@@ -414,6 +641,7 @@ final class AppViewModel: ObservableObject {
     }
 
     private func enqueueInput(url: URL, optionsOverride: ImageProcessingOptions? = nil) {
+        let automationActionsOverride = optionsOverride == nil ? Self.normalizedAutomationActions(automationActions) : [.compression]
         var isDirectory = ObjCBool(false)
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
             appendImmediateFailure(inputURL: url, message: "Input path does not exist")
@@ -446,7 +674,8 @@ final class AppViewModel: ObservableObject {
                     enqueueFile(
                         file,
                         optionsOverride: optionsOverride,
-                        outputDirectoryOverride: outputDirectory
+                        outputDirectoryOverride: outputDirectory,
+                        automationActionsOverride: automationActionsOverride
                     )
                 }
             }
@@ -457,13 +686,14 @@ final class AppViewModel: ObservableObject {
             return
         }
 
-        enqueueFile(url, optionsOverride: optionsOverride)
+        enqueueFile(url, optionsOverride: optionsOverride, automationActionsOverride: automationActionsOverride)
     }
 
     private func enqueueFile(
         _ fileURL: URL,
         optionsOverride: ImageProcessingOptions? = nil,
-        outputDirectoryOverride: URL? = nil
+        outputDirectoryOverride: URL? = nil,
+        automationActionsOverride: [AutomationActionKind]
     ) {
         let queuedItem = queueStateMachine.enqueue(inputURL: fileURL)
         if let optionsOverride {
@@ -472,6 +702,7 @@ final class AppViewModel: ObservableObject {
         if let outputDirectoryOverride {
             outputDirectoryOverrideByID[queuedItem.id] = outputDirectoryOverride
         }
+        automationActionsByID[queuedItem.id] = Self.normalizedAutomationActions(automationActionsOverride)
         let result = ProcessingResult(
             id: queuedItem.id,
             inputURL: fileURL,
@@ -491,6 +722,10 @@ final class AppViewModel: ObservableObject {
 
         refreshQueueProgress()
         startQueueWorkerIfNeeded()
+    }
+
+    private func nextDerivedResultOrder() -> Int {
+        (results.map(\.enqueuedOrder).max() ?? 0) + 1
     }
 
     private func appendImmediateFailure(inputURL: URL, message: String) {
@@ -586,9 +821,12 @@ final class AppViewModel: ObservableObject {
             }
 
             let inputURL = results[index].inputURL
-            let options = optionsOverrideByID[nextItem.id] ?? currentOptions()
+            let actions = automationActionsByID[nextItem.id] ?? Self.normalizedAutomationActions(automationActions)
+            let options = optionsOverrideByID[nextItem.id] ?? currentOptions(enabledActions: actions)
             let outputDirectory = outputDirectoryOverrideByID[nextItem.id]
             let processor = self.processor
+            let backgroundRemovalClient = self.backgroundRemovalClient
+            let backgroundRemovalModel = selectedBackgroundRemovalModel
 
             let statusBridge: @Sendable (ProcessingStatusUpdate) -> Void = { [weak self] update in
                 Task { @MainActor [weak self] in
@@ -597,10 +835,14 @@ final class AppViewModel: ObservableObject {
             }
 
             currentJobTasks[nextItem.id] = Task.detached(priority: .userInitiated) {
-                try processor.processImage(
+                try await Self.processAutomatedImage(
                     at: inputURL,
+                    actions: actions,
                     options: options,
                     outputDirectory: outputDirectory,
+                    processor: processor,
+                    backgroundRemovalClient: backgroundRemovalClient,
+                    backgroundRemovalModel: backgroundRemovalModel,
                     statusHandler: statusBridge
                 )
             }
@@ -608,7 +850,7 @@ final class AppViewModel: ObservableObject {
     }
 
     private var preferredParallelism: Int {
-        let options = currentOptions()
+        let options = currentOptions(enabledActions: AutomationActionKind.allCases)
 
         if options.optimizer.pngUseZopfli || options.optimizer.pngUsePNGOUT {
             return 1
@@ -618,6 +860,162 @@ final class AppViewModel: ObservableObject {
         let cpuBound = max(1, min(4, cores))
         let preferred = max(2, min(4, cores / 2))
         return min(cpuBound, preferred)
+    }
+
+    nonisolated private static func processAutomatedImage(
+        at inputURL: URL,
+        actions requestedActions: [AutomationActionKind],
+        options baseOptions: ImageProcessingOptions,
+        outputDirectory: URL?,
+        processor: ImageProcessor,
+        backgroundRemovalClient: BackgroundRemovalClient,
+        backgroundRemovalModel: BackgroundRemovalModelVariant,
+        statusHandler: @escaping @Sendable (ProcessingStatusUpdate) -> Void
+    ) async throws -> ImageProcessingReport {
+        let actions = normalizedAutomationActions(requestedActions)
+        guard actions.contains(.removeBackground) else {
+            return try processor.processImage(
+                at: inputURL,
+                options: baseOptions,
+                outputDirectory: outputDirectory,
+                statusHandler: statusHandler
+            )
+        }
+
+        let fileManager = FileManager.default
+        let temporaryDirectory = fileManager.temporaryDirectory
+            .appendingPathComponent("PixelCrusherAutomation-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: temporaryDirectory) }
+
+        let originalInputBytes = byteSize(at: inputURL)
+        let finalOutputDirectory = outputDirectory ?? inputURL.deletingLastPathComponent()
+        var currentURL = inputURL
+        var lastReport: ImageProcessingReport?
+        var pendingBackendActions: [AutomationActionKind] = []
+
+        func removeIntermediateIfNeeded(_ url: URL) {
+            guard url != inputURL,
+                  url.path.hasPrefix(temporaryDirectory.path) else {
+                return
+            }
+            try? fileManager.removeItem(at: url)
+        }
+
+        func reportForAutomation(
+            outputURL: URL,
+            outputBytes: Int64,
+            pipelineName: String,
+            selectedTools: [String],
+            warning: String?,
+            summary: String
+        ) -> ImageProcessingReport {
+            let deltaPercent = originalInputBytes > 0
+                ? ((Double(outputBytes - originalInputBytes) / Double(originalInputBytes)) * 100.0)
+                : 0.0
+            let actionSummary = actions.map(\.title).joined(separator: " > ")
+            return ImageProcessingReport(
+                inputURL: inputURL,
+                outputURL: outputURL,
+                pipelineName: pipelineName,
+                selectedTools: selectedTools,
+                inputBytes: originalInputBytes,
+                outputBytes: outputBytes,
+                warning: warning,
+                summary: String(
+                    format: "automation=%@, size=%lldB->%lldB (%+.1f%%), %@",
+                    actionSummary,
+                    originalInputBytes,
+                    outputBytes,
+                    deltaPercent,
+                    summary
+                )
+            )
+        }
+
+        func flushBackendActions(isFinal: Bool, stepIndex: Int) throws {
+            guard !pendingBackendActions.isEmpty else {
+                return
+            }
+
+            var segmentOptions = backendOptions(from: baseOptions, enabledActions: pendingBackendActions)
+            segmentOptions.outputSuffix = isFinal ? baseOptions.outputSuffix : "-automation-\(stepIndex)"
+            let destinationDirectory = isFinal ? finalOutputDirectory : temporaryDirectory
+            let previousURL = currentURL
+            let report = try processor.processImage(
+                at: currentURL,
+                options: segmentOptions,
+                outputDirectory: destinationDirectory,
+                statusHandler: statusHandler
+            )
+            currentURL = report.outputURL
+            removeIntermediateIfNeeded(previousURL)
+            pendingBackendActions.removeAll()
+            lastReport = reportForAutomation(
+                outputURL: report.outputURL,
+                outputBytes: report.outputBytes,
+                pipelineName: report.pipelineName,
+                selectedTools: report.selectedTools,
+                warning: report.warning,
+                summary: report.summary
+            )
+        }
+
+        for (index, action) in actions.enumerated() {
+            if action == .removeBackground {
+                try flushBackendActions(isFinal: false, stepIndex: index)
+                let previousURL = currentURL
+                let hasRemainingActions = actions.dropFirst(index + 1).contains { $0 != .removeBackground }
+                let destinationDirectory = hasRemainingActions ? temporaryDirectory : finalOutputDirectory
+
+                let backgroundReport = try await backgroundRemovalClient.removeBackground(
+                    from: currentURL,
+                    modelVariant: backgroundRemovalModel,
+                    outputDirectory: destinationDirectory
+                ) { update in
+                    statusHandler(ProcessingStatusUpdate(state: .optimizing, message: update.message))
+                }
+
+                currentURL = backgroundReport.outputURL
+                removeIntermediateIfNeeded(previousURL)
+                lastReport = reportForAutomation(
+                    outputURL: backgroundReport.outputURL,
+                    outputBytes: backgroundReport.outputBytes,
+                    pipelineName: "background-removal",
+                    selectedTools: [backgroundRemovalModel.displayName],
+                    warning: nil,
+                    summary: backgroundReport.summary
+                )
+            } else {
+                pendingBackendActions.append(action)
+            }
+        }
+
+        try flushBackendActions(isFinal: true, stepIndex: actions.count)
+
+        guard let lastReport else {
+            throw ImageProcessingError.backendProtocolError("Automation chain did not produce an output")
+        }
+        return lastReport
+    }
+
+    nonisolated private static func backendOptions(
+        from baseOptions: ImageProcessingOptions,
+        enabledActions: [AutomationActionKind]
+    ) -> ImageProcessingOptions {
+        let actionSet = Set(enabledActions)
+        var options = baseOptions
+        if !actionSet.contains(.resize) {
+            options.fixedResizeSize = nil
+            options.maxResizeLongestSide = nil
+        }
+        if !actionSet.contains(.convertFormat) {
+            options.outputFormat = nil
+        }
+        if !actionSet.contains(.trimTransparentBorders) {
+            options.autoTrimTransparentBorders = false
+        }
+        return options
     }
 
     private func waitForNextCompletion() async -> (id: UUID, outcome: JobCompletionOutcome)? {
@@ -649,6 +1047,7 @@ final class AppViewModel: ObservableObject {
         try? queueStateMachine.transition(id: id, to: .done)
         optionsOverrideByID[id] = nil
         outputDirectoryOverrideByID[id] = nil
+        automationActionsByID[id] = nil
 
         guard let index = resultIndexByID[id] else { return }
         results[index].outputURL = report.outputURL
@@ -665,6 +1064,7 @@ final class AppViewModel: ObservableObject {
         try? queueStateMachine.transition(id: id, to: .failed)
         optionsOverrideByID[id] = nil
         outputDirectoryOverrideByID[id] = nil
+        automationActionsByID[id] = nil
 
         guard let index = resultIndexByID[id] else { return }
         results[index].success = false
@@ -718,14 +1118,72 @@ final class AppViewModel: ObservableObject {
         return size.int64Value
     }
 
+    private func persistAutomationActions() {
+        let normalized = Self.normalizedAutomationActions(automationActions)
+        guard normalized == automationActions else {
+            automationActions = normalized
+            return
+        }
+
+        let rawActions = normalized.map(\.rawValue)
+        defaults.set(rawActions, forKey: DefaultsKey.automationActionOrder)
+    }
+
+    private func ensureCompressionAction() {
+        let normalized = Self.normalizedAutomationActions(automationActions)
+        guard normalized != automationActions else {
+            return
+        }
+        automationActions = normalized
+    }
+
+    private static func persistedAutomationActions(defaults: UserDefaults) -> [AutomationActionKind] {
+        guard let rawActions = defaults.stringArray(forKey: DefaultsKey.automationActionOrder) else {
+            return AutomationActionKind.defaultChain
+        }
+
+        let actions = rawActions.compactMap(AutomationActionKind.init(rawValue:))
+        return normalizedAutomationActions(actions)
+    }
+
+    nonisolated private static func normalizedAutomationActions(_ actions: [AutomationActionKind]) -> [AutomationActionKind] {
+        var seen: Set<AutomationActionKind> = []
+        var normalized = actions.filter { action in
+            guard !seen.contains(action) else {
+                return false
+            }
+            seen.insert(action)
+            return true
+        }
+
+        if !normalized.contains(.compression) {
+            normalized.insert(.compression, at: 0)
+        }
+
+        return normalized
+    }
+
+    nonisolated private static func byteSize(at url: URL) -> Int64 {
+        guard url.isFileURL,
+              let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? NSNumber else {
+            return 0
+        }
+
+        return size.int64Value
+    }
+
     private func currentOptions(
-        manualCrop: (size: CropSize, origin: CropOrigin?)? = nil
+        manualCrop: (size: CropSize, origin: CropOrigin?)? = nil,
+        enabledActions: [AutomationActionKind]? = nil
     ) -> ImageProcessingOptions {
+        let enabledActionSet = Set(enabledActions ?? Self.normalizedAutomationActions(automationActions))
         let fixedCropSize = manualCrop?.size
         let fixedCropOrigin = manualCrop?.origin
 
         let fixedResizeSize: CropSize?
-        if fixedResizeEnabled,
+        if enabledActionSet.contains(.resize),
+           fixedResizeEnabled,
            let width = Int(fixedResizeWidth),
            let height = Int(fixedResizeHeight),
            width > 0,
@@ -751,7 +1209,18 @@ final class AppViewModel: ObservableObject {
 
         // Manual crop should be authoritative; running transparent auto-trim first can
         // collapse the crop source bounds and make the selected crop appear ineffective.
-        let shouldTrimTransparent = autoTrimTransparentBorders && fixedCropSize == nil
+        let shouldTrimTransparent = enabledActionSet.contains(.trimTransparentBorders)
+            && autoTrimTransparentBorders
+            && fixedCropSize == nil
+        let maxResizeLongestSide: Int?
+        if enabledActionSet.contains(.resize),
+           autoResizeLongestSideEnabled,
+           let value = Int(autoResizeLongestSide),
+           value > 0 {
+            maxResizeLongestSide = value
+        } else {
+            maxResizeLongestSide = nil
+        }
 
         return ImageProcessingOptions(
             overwriteOriginal: overwriteOriginal,
@@ -759,7 +1228,9 @@ final class AppViewModel: ObservableObject {
             fixedCropSize: fixedCropSize,
             fixedCropOrigin: fixedCropOrigin,
             fixedResizeSize: fixedResizeSize,
+            maxResizeLongestSide: maxResizeLongestSide,
             fixedCropAnchor: cropAnchor,
+            outputFormat: enabledActionSet.contains(.convertFormat) ? autoConvertOutputFormat : nil,
             optimizer: optimizer,
             outputSuffix: "-pixelcrusher"
         )

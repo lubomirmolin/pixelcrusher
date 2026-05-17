@@ -4,6 +4,7 @@ public enum OutputImageFormat: String, Sendable, CaseIterable {
     case png
     case jpeg
     case gif
+    case webp
 
     public var displayName: String {
         switch self {
@@ -13,6 +14,8 @@ public enum OutputImageFormat: String, Sendable, CaseIterable {
             return "JPG"
         case .gif:
             return "GIF"
+        case .webp:
+            return "WEBP"
         }
     }
 
@@ -24,6 +27,8 @@ public enum OutputImageFormat: String, Sendable, CaseIterable {
             return .jpeg
         case "gif":
             return .gif
+        case "webp":
+            return .webp
         default:
             return nil
         }
@@ -36,6 +41,7 @@ public struct ImageProcessingOptions: Sendable {
     public var fixedCropSize: CropSize?
     public var fixedCropOrigin: CropOrigin?
     public var fixedResizeSize: CropSize?
+    public var maxResizeLongestSide: Int?
     public var fixedCropAnchor: CropAnchor
     public var outputFormat: OutputImageFormat?
     public var optimizer: OptimizerPreferences
@@ -47,6 +53,7 @@ public struct ImageProcessingOptions: Sendable {
         fixedCropSize: CropSize? = nil,
         fixedCropOrigin: CropOrigin? = nil,
         fixedResizeSize: CropSize? = nil,
+        maxResizeLongestSide: Int? = nil,
         fixedCropAnchor: CropAnchor = .center,
         outputFormat: OutputImageFormat? = nil,
         optimizer: OptimizerPreferences = OptimizerPreferences(),
@@ -57,6 +64,7 @@ public struct ImageProcessingOptions: Sendable {
         self.fixedCropSize = fixedCropSize
         self.fixedCropOrigin = fixedCropOrigin
         self.fixedResizeSize = fixedResizeSize
+        self.maxResizeLongestSide = maxResizeLongestSide
         self.fixedCropAnchor = fixedCropAnchor
         self.outputFormat = outputFormat
         self.optimizer = optimizer
@@ -510,7 +518,8 @@ private struct CLIProcessOptions: Encodable {
             cropY: options.fixedCropOrigin.map { UInt32($0.y) },
             cropAnchor: CLITransform.serializedCropAnchor(options.fixedCropAnchor),
             resizeWidth: options.fixedResizeSize.map { UInt32($0.width) },
-            resizeHeight: options.fixedResizeSize.map { UInt32($0.height) }
+            resizeHeight: options.fixedResizeSize.map { UInt32($0.height) },
+            resizeLongestSide: options.maxResizeLongestSide.map { UInt32(max(1, $0)) }
         )
         outputFormat = options.outputFormat?.rawValue
         compression = CLICompression(from: options.optimizer)
@@ -532,6 +541,7 @@ private struct CLITransform: Encodable {
     let cropAnchor: String
     let resizeWidth: UInt32?
     let resizeHeight: UInt32?
+    let resizeLongestSide: UInt32?
 
     static func serializedCropAnchor(_ anchor: CropAnchor) -> String {
         switch anchor {
@@ -556,6 +566,7 @@ private struct CLITransform: Encodable {
         case cropAnchor = "crop_anchor"
         case resizeWidth = "resize_width"
         case resizeHeight = "resize_height"
+        case resizeLongestSide = "resize_longest_side"
     }
 }
 

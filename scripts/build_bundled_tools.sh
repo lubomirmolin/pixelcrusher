@@ -188,10 +188,13 @@ SVGO_RUNTIME_DIR="$TMP_DIR/svgo-runtime"
 mkdir -p "$SVGO_RUNTIME_DIR"
 cat > "$SVGO_RUNTIME_DIR/package.json" <<'JSON'
 {
-  "name": "pixelcrusher-svgo-runtime",
+  "name": "pixelcrusher-node-runtime",
   "private": true,
   "version": "1.0.0",
   "dependencies": {
+    "jpeg-js": "0.4.4",
+    "onnxruntime-node": "1.23.0",
+    "pngjs": "7.0.0",
     "svgo": "4.0.0"
   }
 }
@@ -199,10 +202,17 @@ JSON
 
 (
   cd "$SVGO_RUNTIME_DIR"
-  npm install --omit=dev --ignore-scripts --silent
+  npm install \
+    --userconfig=/dev/null \
+    --registry=https://registry.npmjs.org/ \
+    --omit=dev \
+    --ignore-scripts
 )
 
 cp -R "$SVGO_RUNTIME_DIR/node_modules" "$DEST_ROOT/node/node_modules"
+
+mkdir -p "$DEST_ROOT/node/rmbg"
+cp "$ROOT_DIR/scripts/rmbg/remove_bg.cjs" "$DEST_ROOT/node/rmbg/remove_bg.cjs"
 
 cat > "$DEST_ROOT/bin/svgo" <<'EOF'
 #!/usr/bin/env bash
@@ -211,6 +221,14 @@ TOOL_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 exec "$TOOL_ROOT/node/bin/node" "$TOOL_ROOT/node/node_modules/svgo/bin/svgo.js" "$@"
 EOF
 chmod +x "$DEST_ROOT/bin/svgo"
+
+cat > "$DEST_ROOT/bin/rmbg-remove" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+TOOL_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+exec "$TOOL_ROOT/node/bin/node" "$TOOL_ROOT/node/rmbg/remove_bg.cjs" "$@"
+EOF
+chmod +x "$DEST_ROOT/bin/rmbg-remove"
 
 MANIFEST="$DEST_ROOT/runtime_manifest.txt"
 {

@@ -44,6 +44,7 @@ pub struct TransformOptions {
     pub crop_anchor: CropAnchor,
     pub resize_width: Option<u32>,
     pub resize_height: Option<u32>,
+    pub resize_longest_side: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

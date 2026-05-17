@@ -191,26 +191,11 @@ export function ProcessedItemsPanel({
     [folderJobIDs, processedItems],
   );
 
-  const [expandedFolderIDs, setExpandedFolderIDs] = useState<Set<string>>(new Set());
-
-  useEffect(() => {
-    if (!activeFolderDrop) {
-      return;
-    }
-
-    setExpandedFolderIDs((current) => {
-      if (current.has(activeFolderDrop.id)) {
-        return current;
-      }
-
-      const next = new Set(current);
-      next.add(activeFolderDrop.id);
-      return next;
-    });
-  }, [activeFolderDrop]);
+  const [collapsedFolderIDs, setCollapsedFolderIDs] = useState<Set<string>>(new Set());
+  const activeFolderExpanded = activeFolderDrop ? !collapsedFolderIDs.has(activeFolderDrop.id) : false;
 
   const toggleFolder = (folderID: string) => {
-    setExpandedFolderIDs((current) => {
+    setCollapsedFolderIDs((current) => {
       const next = new Set(current);
       if (next.has(folderID)) {
         next.delete(folderID);
@@ -249,7 +234,7 @@ export function ProcessedItemsPanel({
                   className="w-full flex items-center justify-between text-left"
                 >
                   <div className="flex items-center gap-2">
-                    {expandedFolderIDs.has(activeFolderDrop.id) ? (
+                    {activeFolderExpanded ? (
                       <ChevronDown size={14} />
                     ) : (
                       <ChevronRight size={14} />
@@ -260,7 +245,7 @@ export function ProcessedItemsPanel({
                   <span className="text-[11px] text-gray-500">{folderJobs.length} file{folderJobs.length === 1 ? '' : 's'}</span>
                 </button>
 
-                {expandedFolderIDs.has(activeFolderDrop.id) ? (
+                {activeFolderExpanded ? (
                   <div className="mt-3 space-y-2">
                     {folderJobs.length === 0 ? (
                       <div className="text-[12px] text-gray-500 px-1">Preparing files…</div>
