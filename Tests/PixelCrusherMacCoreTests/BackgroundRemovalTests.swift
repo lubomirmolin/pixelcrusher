@@ -72,7 +72,7 @@ struct BackgroundRemovalTests {
         try "#!/bin/sh\nexit 0\n".write(to: tool, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)
 
-        let payload = Data("full-model".utf8)
+        let payload = Data("fast-model".utf8)
         MockModelDownloadURLProtocol.payload = payload
         MockModelDownloadURLProtocol.statusCode = 200
         let config = URLSessionConfiguration.ephemeral
@@ -86,15 +86,15 @@ struct BackgroundRemovalTests {
         )
 
         let collector = BackgroundRemovalUpdateCollector()
-        let installedURL = try await client.downloadModel(.highQuality) { update in
+        let installedURL = try await client.downloadModel(.fast) { update in
             collector.append(update)
         }
 
         let installedData = try Data(contentsOf: installedURL)
         let updates = collector.snapshot()
-        #expect(installedURL.lastPathComponent == "model.onnx")
+        #expect(installedURL.lastPathComponent == "model_quantized.onnx")
         #expect(installedData == payload)
-        #expect(FileManager.default.fileExists(atPath: tempDir.appendingPathComponent("models/model_quantized.onnx").path) == false)
+        #expect(FileManager.default.fileExists(atPath: tempDir.appendingPathComponent("models/model.onnx").path) == false)
         #expect(updates.contains { $0.phase == "download" })
         #expect(updates.contains { $0.phase == "install" })
     }
@@ -160,8 +160,8 @@ printf '{"event":"finished","payload":{"success":true,"output_path":"%s","output
 
         let modelRoot = tempDir.appendingPathComponent("models", isDirectory: true)
         try FileManager.default.createDirectory(at: modelRoot, withIntermediateDirectories: true)
-        let fullModel = modelRoot.appendingPathComponent("model.onnx")
-        try Data([9, 9, 9]).write(to: fullModel)
+        let fastModel = modelRoot.appendingPathComponent("model_quantized.onnx")
+        try Data([9, 9, 9]).write(to: fastModel)
 
         let input = tempDir.appendingPathComponent("input.png")
         try Data([0x89, 0x50, 0x4E, 0x47]).write(to: input)
@@ -174,7 +174,7 @@ printf '{"event":"finished","payload":{"success":true,"output_path":"%s","output
         let collector = BackgroundRemovalUpdateCollector()
         let report = try await client.removeBackground(
             from: input,
-            modelVariant: .highQuality,
+            modelVariant: .fast,
             focusRect: CGRect(x: 12, y: 34, width: 56, height: 78)
         ) { update in
             collector.append(update)
@@ -183,7 +183,7 @@ printf '{"event":"finished","payload":{"success":true,"output_path":"%s","output
         let args = try String(contentsOf: argsPath, encoding: .utf8)
         let updates = collector.snapshot()
         #expect(args.contains("--model"))
-        #expect(args.contains(fullModel.path))
+        #expect(args.contains(fastModel.path))
         #expect(args.contains("--input"))
         #expect(args.contains("--output"))
         #expect(args.contains("--roi"))
