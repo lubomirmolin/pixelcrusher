@@ -46,6 +46,7 @@ fi
 
 rm -rf "$DEST_ROOT"
 mkdir -p "$DEST_ROOT/bin" "$DEST_ROOT/native/bin" "$DEST_ROOT/native/lib" "$DEST_ROOT/node/bin"
+: > "$DEST_ROOT/.gitkeep"
 
 MOZJPEG_PREFIX="$(brew --prefix mozjpeg)"
 PNGQUANT_PREFIX="$(brew --prefix pngquant)"
@@ -237,7 +238,7 @@ MANIFEST="$DEST_ROOT/runtime_manifest.txt"
   echo "Node runtime: $NODE_VERSION"
   echo ""
   echo "Required tools:"
-  for t in cjpeg pngquant pngcrush svgo gifsicle; do
+  for t in cjpeg pngquant pngcrush svgo gifsicle rmbg-remove; do
     if [[ -x "$DEST_ROOT/bin/$t" ]]; then
       echo "- $t: $($DEST_ROOT/bin/$t --version 2>/dev/null | head -n 1 || echo ready)"
     else
@@ -256,4 +257,4 @@ MANIFEST="$DEST_ROOT/runtime_manifest.txt"
   fi
 } > "$MANIFEST"
 
-chmod -R go-w "$DEST_ROOT"
+chmod -R u+rwX,go-w "$DEST_ROOT"

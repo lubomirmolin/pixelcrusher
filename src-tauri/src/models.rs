@@ -31,6 +31,32 @@ pub(crate) struct JobResultEntry {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub(crate) struct BackgroundRemovalSuitabilitySnapshot {
+    pub level: String,
+    pub message: String,
+    pub is_available: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct BackgroundRemovalModelStatusSnapshot {
+    pub model: String,
+    pub display_name: String,
+    pub short_label: String,
+    pub detail: String,
+    pub is_installed: bool,
+    pub model_path: String,
+    pub installed_bytes: Option<u64>,
+    pub download_bytes: u64,
+    pub suitability: BackgroundRemovalSuitabilitySnapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct BackgroundRemovalEventPayload {
+    pub phase: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct QueueEventPayload {
     pub job: JobSnapshot,
     pub result: Option<JobResultEntry>,

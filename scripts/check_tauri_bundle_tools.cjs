@@ -41,14 +41,14 @@ async function walk(dir) {
 function expectedForPlatform(platform) {
   if (platform === 'windows') {
     return {
-      required: ['cjpeg.exe', 'pngquant.exe', 'pngcrush.exe', 'gifsicle.exe', 'svgo.cmd', 'node.exe'],
+      required: ['cjpeg.exe', 'pngquant.exe', 'pngcrush.exe', 'gifsicle.exe', 'svgo.cmd', 'rmbg-remove.cmd', 'node.exe'],
       optional: ['zopflipng.exe'],
     };
   }
 
   if (platform === 'linux') {
     return {
-      required: ['cjpeg', 'pngquant', 'pngcrush', 'gifsicle', 'svgo', 'node'],
+      required: ['cjpeg', 'pngquant', 'pngcrush', 'gifsicle', 'svgo', 'rmbg-remove', 'node'],
       optional: ['zopflipng'],
     };
   }

@@ -1,12 +1,16 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use pixelcrusher_core::model::ProcessingOptions;
+use pixelcrusher_core::model::ProcessingReport;
 use pixelcrusher_core::queue::{JobEvent, JobState};
+use serde::Deserialize;
 use tauri::Emitter;
 use uuid::Uuid;
 
+use crate::commands::background_removal::{asset_format_label, run_background_removal};
 use crate::constants::MAX_RECENT_RESULTS;
 use crate::models::{JobResultEntry, JobSnapshot, QueueEventPayload};
 use crate::path_utils::is_supported_image_path;
@@ -18,12 +22,19 @@ pub(crate) struct EnqueueCandidate {
     pub output_dir: PathBuf,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct AutomationSettings {
+    pub actions: Vec<String>,
+    pub background_model: Option<String>,
+}
+
 #[tauri::command]
 pub fn enqueue_paths(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     paths: Vec<String>,
     options: ProcessingOptions,
+    automation: Option<AutomationSettings>,
 ) -> Result<Vec<JobSnapshot>, String> {
     let runtime = state.runtime.clone();
     let enqueue_candidates = normalize_input_paths(paths, &runtime.output_dir)?;
@@ -84,6 +95,7 @@ pub fn enqueue_paths(
         let app_handle = app.clone();
         let state_clone = runtime.clone();
         let options_clone = options.clone();
+        let automation_clone = automation.clone();
 
         tauri::async_runtime::spawn_blocking(move || {
             process_job(
@@ -93,6 +105,7 @@ pub fn enqueue_paths(
                 &input_path,
                 &output_dir,
                 &options_clone,
+                automation_clone.as_ref(),
             );
         });
     }
@@ -107,6 +120,7 @@ fn process_job(
     input_path: &str,
     output_dir: &Path,
     options: &ProcessingOptions,
+    automation: Option<&AutomationSettings>,
 ) {
     log::info!(
         "Starting processing pipeline for job {} ({})",
@@ -153,8 +167,20 @@ fn process_job(
         return;
     }
 
-    let process_result =
-        pixelcrusher_core::processing::process_asset(Path::new(input_path), output_dir, options);
+    let process_result = if let Some(automation) = automation {
+        process_automated_asset(
+            &app,
+            &state,
+            &id,
+            Path::new(input_path),
+            output_dir,
+            options,
+            automation,
+        )
+    } else {
+        pixelcrusher_core::processing::process_asset(Path::new(input_path), output_dir, options)
+            .map_err(|error| error.to_string())
+    };
 
     match process_result {
         Ok(result) => {
@@ -204,6 +230,246 @@ fn process_job(
             );
         }
     }
+}
+
+fn process_automated_asset(
+    app: &tauri::AppHandle,
+    state: &Arc<RuntimeState>,
+    id: &str,
+    input_path: &Path,
+    output_dir: &Path,
+    options: &ProcessingOptions,
+    automation: &AutomationSettings,
+) -> Result<ProcessingReport, String> {
+    let actions = normalize_automation_actions(&automation.actions);
+    if !actions.iter().any(|action| action == "removeBackground") {
+        let scoped_options = options_for_actions(options, &actions);
+        return pixelcrusher_core::processing::process_asset(
+            input_path,
+            output_dir,
+            &scoped_options,
+        )
+        .map_err(|error| error.to_string());
+    }
+
+    let started = Instant::now();
+    let original_input_bytes = std::fs::metadata(input_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let temp_dir = std::env::temp_dir().join(format!("PixelCrusherAutomation-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir)
+        .map_err(|error| format!("failed to create automation temp directory: {error}"))?;
+
+    let mut current_path = input_path.to_path_buf();
+    let mut stages_run = Vec::new();
+    let mut pending_actions = Vec::<String>::new();
+    let model = automation
+        .background_model
+        .as_deref()
+        .unwrap_or("fast")
+        .to_string();
+
+    for (index, action) in actions.iter().enumerate() {
+        if action == "removeBackground" {
+            stages_run.extend(flush_backend_actions(
+                app,
+                state,
+                id,
+                input_path,
+                &temp_dir,
+                output_dir,
+                options,
+                &mut pending_actions,
+                &mut current_path,
+                false,
+                index,
+            )?);
+            let has_remaining_backend_actions = actions
+                .iter()
+                .skip(index + 1)
+                .any(|remaining| remaining != "removeBackground");
+            let destination = if has_remaining_backend_actions {
+                temp_dir.as_path()
+            } else {
+                output_dir
+            };
+            emit_snapshot_update(app, state, id, 68, "Running background removal");
+            let run = run_background_removal(
+                state,
+                &current_path,
+                Some(destination),
+                &model,
+                None,
+                None,
+                |_, message| emit_snapshot_update(app, state, id, 72, message),
+            )?;
+            if current_path != input_path && current_path.starts_with(&temp_dir) {
+                let _ = std::fs::remove_file(&current_path);
+            }
+            current_path = run.output_path;
+            stages_run.extend(run.stages_run);
+        } else {
+            pending_actions.push(action.clone());
+        }
+    }
+
+    stages_run.extend(flush_backend_actions(
+        app,
+        state,
+        id,
+        input_path,
+        &temp_dir,
+        output_dir,
+        options,
+        &mut pending_actions,
+        &mut current_path,
+        true,
+        actions.len(),
+    )?);
+
+    let output_bytes = std::fs::metadata(&current_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    Ok(ProcessingReport {
+        source_path: input_path.display().to_string(),
+        destination_path: current_path.display().to_string(),
+        asset_format: asset_format_label(&current_path),
+        input_bytes: original_input_bytes,
+        output_bytes,
+        elapsed_ms: started.elapsed().as_millis(),
+        applied_stages: stages_run,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flush_backend_actions(
+    app: &tauri::AppHandle,
+    state: &Arc<RuntimeState>,
+    id: &str,
+    input_path: &Path,
+    temp_dir: &Path,
+    output_dir: &Path,
+    options: &ProcessingOptions,
+    pending_actions: &mut Vec<String>,
+    current_path: &mut PathBuf,
+    is_final: bool,
+    step_index: usize,
+) -> Result<Vec<String>, String> {
+    if pending_actions.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let segment_options = options_for_actions(options, pending_actions);
+    let destination = if is_final { output_dir } else { temp_dir };
+    emit_snapshot_update(
+        app,
+        state,
+        id,
+        54,
+        if is_final {
+            "Optimizing output"
+        } else {
+            "Preparing automation step"
+        },
+    );
+
+    let report =
+        pixelcrusher_core::processing::process_asset(current_path, destination, &segment_options)
+            .map_err(|error| error.to_string())?;
+    if current_path != input_path && current_path.starts_with(temp_dir) {
+        let _ = std::fs::remove_file(&current_path);
+    }
+    *current_path = PathBuf::from(&report.destination_path);
+    pending_actions.clear();
+
+    if !is_final {
+        emit_snapshot_update(
+            app,
+            state,
+            id,
+            58_u8
+                .saturating_add((step_index as u8).saturating_mul(6))
+                .min(88),
+            "Automation step complete",
+        );
+    }
+
+    Ok(report.applied_stages)
+}
+
+fn normalize_automation_actions(actions: &[String]) -> Vec<String> {
+    let mut normalized = Vec::<String>::new();
+    for action in actions {
+        if is_known_automation_action(action) && !normalized.iter().any(|item| item == action) {
+            normalized.push(action.clone());
+        }
+    }
+
+    if !normalized.iter().any(|action| action == "compression") {
+        normalized.insert(0, "compression".to_string());
+    }
+
+    normalized
+}
+
+fn is_known_automation_action(action: &str) -> bool {
+    matches!(
+        action,
+        "compression" | "removeBackground" | "resize" | "convertFormat" | "trimTransparentBorders"
+    )
+}
+
+fn options_for_actions(base: &ProcessingOptions, actions: &[String]) -> ProcessingOptions {
+    let mut options = base.clone();
+    let has_action = |candidate: &str| actions.iter().any(|action| action == candidate);
+
+    if !has_action("resize") {
+        options.transform.resize_width = None;
+        options.transform.resize_height = None;
+        options.transform.resize_longest_side = None;
+    }
+
+    if !has_action("convertFormat") {
+        options.output_format = None;
+    }
+
+    if !has_action("trimTransparentBorders") {
+        options.trim_transparent = false;
+    }
+
+    options
+}
+
+fn emit_snapshot_update(
+    app: &tauri::AppHandle,
+    state: &Arc<RuntimeState>,
+    id: &str,
+    progress: u8,
+    message: &str,
+) {
+    let snapshot = {
+        let mut jobs = state.jobs.lock().unwrap();
+        let Some(existing) = jobs.get(id).cloned() else {
+            return;
+        };
+        let snapshot = JobSnapshot {
+            progress,
+            message: message.to_string(),
+            ..existing
+        };
+        jobs.insert(id.to_string(), snapshot.clone());
+        snapshot
+    };
+
+    let _ = app.emit(
+        "queue://event",
+        QueueEventPayload {
+            job: snapshot,
+            result: None,
+        },
+    );
 }
 
 fn transition_and_emit(

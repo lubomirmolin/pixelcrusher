@@ -12,6 +12,9 @@ pub fn run() {
         .setup(bootstrap::setup)
         .invoke_handler(tauri::generate_handler![
             commands::app_info::startup_diagnostics,
+            commands::background_removal::background_removal_statuses,
+            commands::background_removal::download_background_removal_model,
+            commands::background_removal::remove_background,
             commands::queue::enqueue_paths,
             commands::app_info::recent_results,
             commands::files::reveal_in_finder,

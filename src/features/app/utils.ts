@@ -1,7 +1,7 @@
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { RELEASES_PAGE_URL } from '../../config/release';
-import { SUPPORTED_EXTENSIONS } from './constants';
-import type { DragValidationState } from './types';
+import { OUTPUT_FORMATS, SUPPORTED_EXTENSIONS } from './constants';
+import type { DragValidationState, OutputImageFormat } from './types';
 
 export function basename(filePath: string): string {
   const parts = filePath.split(/[\\/]/).filter(Boolean);
@@ -86,6 +86,25 @@ export function mimeTypeForPath(path: string): string {
     default:
       return 'application/octet-stream';
   }
+}
+
+export function outputFormatForPath(path: string): OutputImageFormat | null {
+  const ext = fileExtension(path);
+  if (ext === 'jpg') {
+    return 'jpeg';
+  }
+  return OUTPUT_FORMATS.includes(ext as OutputImageFormat) ? (ext as OutputImageFormat) : null;
+}
+
+export function availableConversionFormats(path: string): OutputImageFormat[] {
+  const sourceFormat = outputFormatForPath(path);
+  if (!sourceFormat && fileExtension(path) !== 'svg') {
+    return [];
+  }
+  if (fileExtension(path) === 'svg') {
+    return OUTPUT_FORMATS;
+  }
+  return OUTPUT_FORMATS.filter((format) => format !== sourceFormat);
 }
 
 export function classifyInputPath(path: string): 'supported' | 'unsupported' | 'unknown' {

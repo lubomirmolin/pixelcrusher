@@ -5,6 +5,9 @@ import { UpdateRail } from './components/UpdateRail';
 import { ProcessedItemsPanel } from './components/ProcessedItemsPanel';
 import { CropModal } from './components/CropModal';
 import { ResizeModal } from './components/ResizeModal';
+import { AutomationSidebar } from './components/AutomationSidebar';
+import { BackgroundRemovalModal } from './components/BackgroundRemovalModal';
+import { ConversionModal } from './components/ConversionModal';
 import { useQueueController } from './features/app/hooks/useQueueController';
 import { useUpdateController } from './features/app/hooks/useUpdateController';
 import type { CompressionProfileId } from './features/app/types';
@@ -15,13 +18,32 @@ function App() {
     dragState,
     profile,
     setProfile,
-    autoCrop,
+    automationActions,
+    availableAutomationActions,
+    autoTrimTransparentBorders,
+    setAutoTrimTransparentBorders,
+    autoResizeLongestSideEnabled,
+    setAutoResizeLongestSideEnabled,
+    autoResizeLongestSide,
+    setAutoResizeLongestSide,
+    autoConvertOutputFormat,
+    setAutoConvertOutputFormat,
+    selectedBackgroundRemovalModel,
+    setSelectedBackgroundRemovalModel,
+    backgroundRemovalStatuses,
+    backgroundRemovalProgressMessage,
+    backgroundRemovalErrorMessage,
+    backgroundRemovalRunning,
     activeCropItem,
     activeResizeItem,
+    activeBackgroundRemovalItem,
+    activeConversionRequest,
     cropDraft,
     setCropDraft,
     resizeDraft,
     setResizeDraft,
+    rasterConversionDraft,
+    setRasterConversionDraft,
     activePunch,
     activeFolderDrop,
     activeFolderPunch,
@@ -38,13 +60,23 @@ function App() {
     onDragLeave,
     openItemCropModal,
     openItemResizeModal,
+    openItemBackgroundRemovalModal,
+    openItemConversion,
     applyItemCrop,
     applyItemResize,
+    applyRasterConversion,
+    applyBackgroundRemoval,
+    downloadBackgroundRemovalModel,
+    addAutomationAction,
+    removeAutomationAction,
+    moveAutomationAction,
     handlePunchComplete,
     handleFolderPunchComplete,
     clearProcessedItems,
     closeCropModal,
     closeResizeModal,
+    closeBackgroundRemovalModal,
+    closeConversionModal,
   } = useQueueController();
 
   const {
@@ -57,14 +89,36 @@ function App() {
   } = useUpdateController();
 
   const [showUpdateSheet, setShowUpdateSheet] = useState(false);
+  const jobs = Object.values(queueState.jobs);
+  const completedJobs = jobs.filter((job) => job.status === 'completed' || job.status === 'failed').length;
+  const hasActiveJobs = jobs.some((job) => job.status !== 'completed' && job.status !== 'failed');
+  const showBottomHint = !isEmptyState || hasActiveJobs;
 
   return (
-    <div className="h-screen w-screen flex flex-col bg-[#f3f3f3] font-sans antialiased text-[#333] transition-colors duration-300 overflow-hidden" onDrop={onDropFiles} onDragEnter={onDragEnter} onDragLeave={onDragLeave} onDragOver={onDragOver}>
-      <div className="flex-1 overflow-hidden relative flex flex-col">
-        <div className="flex-1 overflow-y-auto relative flex flex-col px-6 py-4">
-          <div className="flex justify-between items-end mb-6">
-            <h1 className="text-2xl font-semibold text-gray-900 tracking-tight">Image Queue</h1>
-            <div className="flex space-x-3 items-center">
+    <div className="h-screen w-screen overflow-hidden bg-[#d7d8db] font-sans antialiased text-[#333]" onDrop={onDropFiles} onDragEnter={onDragEnter} onDragLeave={onDragLeave} onDragOver={onDragOver}>
+      <div className="relative flex h-full min-h-0">
+        <AutomationSidebar
+          actions={automationActions}
+          availableActions={availableAutomationActions}
+          autoTrimTransparentBorders={autoTrimTransparentBorders}
+          setAutoTrimTransparentBorders={setAutoTrimTransparentBorders}
+          autoResizeLongestSideEnabled={autoResizeLongestSideEnabled}
+          setAutoResizeLongestSideEnabled={setAutoResizeLongestSideEnabled}
+          autoResizeLongestSide={autoResizeLongestSide}
+          setAutoResizeLongestSide={setAutoResizeLongestSide}
+          autoConvertOutputFormat={autoConvertOutputFormat}
+          setAutoConvertOutputFormat={setAutoConvertOutputFormat}
+          selectedBackgroundRemovalModel={selectedBackgroundRemovalModel}
+          setSelectedBackgroundRemovalModel={setSelectedBackgroundRemovalModel}
+          addAutomationAction={addAutomationAction}
+          removeAutomationAction={removeAutomationAction}
+          moveAutomationAction={moveAutomationAction}
+        />
+
+        <main className="relative flex min-w-0 flex-1 flex-col bg-[#ececef]/90">
+          <div className="flex h-[58px] items-center justify-between border-b border-black/10 bg-[#f2f3f5]/95 px-5">
+            <h1 className="text-[20px] font-semibold tracking-tight text-gray-900">Image Queue</h1>
+            <div className="flex items-center gap-3">
               <select
                 value={profile}
                 onChange={(event) => setProfile(event.target.value as CompressionProfileId)}
@@ -82,64 +136,70 @@ function App() {
               >
                 Update
               </button>
-              <label className="sr-only">
-                <input
-                  type="checkbox"
-                  checked={autoCrop}
-                  readOnly
-                  aria-label="Autocrop"
-                />
-                Autocrop
-              </label>
             </div>
           </div>
 
-          {queueState.lastError && (
-            <div className="mb-4 rounded border border-[#d7364a]/40 bg-[#d7364a]/5 px-3 py-2 text-[12px] text-[#8f1d2a]" role="alert">
-              {queueState.lastError}
-            </div>
-          )}
+          <div className="relative flex min-h-0 flex-1 flex-col">
+            {queueState.lastError && (
+              <div className="mx-4 mt-4 rounded border border-[#d7364a]/40 bg-[#d7364a]/5 px-3 py-2 text-[12px] text-[#8f1d2a]" role="alert">
+                {queueState.lastError}
+              </div>
+            )}
 
-          {isEmptyState ? (
-            <div className="flex flex-col items-center justify-center text-gray-400 flex-1 border border-dashed border-gray-300 rounded-xl bg-white/50 mb-4" data-testid="empty-state">
-              <div className="w-24 h-24 mb-4 flex items-center justify-center shadow-sm rounded-xl bg-white border border-gray-200">
-                <UploadCloud size={40} className="text-[#005fb8]" />
+            {isEmptyState ? (
+              <div className="flex flex-1 flex-col items-center justify-center bg-[#e1e2e5]/80 text-gray-400" data-testid="empty-state">
+                <div className="mb-4 flex h-[124px] w-[124px] items-center justify-center rounded-[22px] border border-dashed border-gray-400/60 bg-white/45">
+                  <UploadCloud size={44} className="text-gray-500" />
+                </div>
+                <p className="text-[18px] font-semibold text-gray-600">Drag & Drop images here</p>
+                <p className="mt-1 text-[16px] text-gray-500">or</p>
+                <div className="mt-4 flex items-center gap-2">
+                  <button
+                    onClick={() => void onOpenSystemPicker()}
+                    className="rounded border border-gray-300 bg-white px-4 py-2 text-[14px] font-medium text-gray-800 shadow-sm transition-colors hover:bg-gray-50 active:opacity-80"
+                  >
+                    Browse Files
+                  </button>
+                  <button
+                    onClick={() => void onOpenFolderPicker()}
+                    className="rounded border border-gray-300 bg-white px-4 py-2 text-[14px] font-medium text-gray-800 shadow-sm transition-colors hover:bg-gray-50 active:opacity-80"
+                  >
+                    Browse Folder
+                  </button>
+                </div>
               </div>
-              <p className="text-[14px] font-medium text-gray-800">Drag & Drop images here</p>
-              <p className="text-[12px] mt-1">or</p>
-              <div className="mt-3 flex items-center gap-2">
-                <button
-                  onClick={() => void onOpenSystemPicker()}
-                  className="px-4 py-1.5 shadow-sm text-[13px] font-medium transition-colors bg-[#005fb8] border border-transparent rounded text-white hover:bg-[#0058a6] active:opacity-80"
-                >
-                  Browse Files
-                </button>
-                <button
-                  onClick={() => void onOpenFolderPicker()}
-                  className="px-4 py-1.5 shadow-sm text-[13px] font-medium transition-colors bg-white border border-gray-300 rounded text-gray-800 hover:bg-gray-50 active:opacity-80"
-                >
-                  Browse Folder
-                </button>
+            ) : (
+              <div className="flex min-h-0 flex-1 flex-col gap-4 p-4" data-testid="list-state">
+                <ProcessedItemsPanel
+                  processedItems={processedItems}
+                  queueJobs={queueState.jobs}
+                  activeFolderDrop={activeFolderDrop}
+                  activeFolderPunch={activeFolderPunch}
+                  activePunch={activePunch}
+                  onOpenItemCrop={openItemCropModal}
+                  onOpenItemResize={openItemResizeModal}
+                  onOpenItemBackgroundRemoval={openItemBackgroundRemovalModal}
+                  onOpenItemConversion={openItemConversion}
+                  onClearProcessedItems={clearProcessedItems}
+                  onPunchComplete={handlePunchComplete}
+                  onFolderPunchComplete={handleFolderPunchComplete}
+                  scrollViewportRef={scrollViewportRef}
+                />
               </div>
+            )}
+          </div>
+
+          {showBottomHint ? (
+            <div className="flex min-h-[30px] items-center justify-center gap-2 border-t border-black/10 bg-gradient-to-r from-[#f2f3f5] to-[#e7e8eb] text-[12px] font-medium text-gray-500">
+              <span>Drag and drop to process more images</span>
+              {jobs.length > 0 && hasActiveJobs ? (
+                <>
+                  <span>/</span>
+                  <span className="font-mono text-[11px]">{completedJobs}/{jobs.length} done</span>
+                </>
+              ) : null}
             </div>
-          ) : (
-            <div className="flex flex-col flex-1 gap-4 min-h-0" data-testid="list-state">
-              <ProcessedItemsPanel
-                processedItems={processedItems}
-                queueJobs={queueState.jobs}
-                activeFolderDrop={activeFolderDrop}
-                activeFolderPunch={activeFolderPunch}
-                activePunch={activePunch}
-                onOpenItemCrop={openItemCropModal}
-                onOpenItemResize={openItemResizeModal}
-                onClearProcessedItems={clearProcessedItems}
-                onPunchComplete={handlePunchComplete}
-                onFolderPunchComplete={handleFolderPunchComplete}
-                scrollViewportRef={scrollViewportRef}
-              />
-            </div>
-          )}
-        </div>
+          ) : null}
 
         {dragState !== 'idle' && (
           <div className={`absolute inset-0 border-4 border-dashed m-4 flex items-center justify-center z-50 backdrop-blur-[2px] transition-all ${dragState === 'unsupported' ? 'bg-[#d7364a]/5 border-[#d7364a]/40' : 'bg-[#005fb8]/5 border-[#005fb8]/40'} rounded-xl`}>
@@ -152,6 +212,7 @@ function App() {
             </div>
           </div>
         )}
+        </main>
       </div>
 
       <input
@@ -201,6 +262,28 @@ function App() {
         onDraftChange={setResizeDraft}
         onClose={closeResizeModal}
         onApply={applyItemResize}
+      />
+
+      <BackgroundRemovalModal
+        activeItem={activeBackgroundRemovalItem}
+        modelStatuses={backgroundRemovalStatuses}
+        selectedModel={selectedBackgroundRemovalModel}
+        setSelectedModel={setSelectedBackgroundRemovalModel}
+        isRunning={backgroundRemovalRunning}
+        progressMessage={backgroundRemovalProgressMessage}
+        errorMessage={backgroundRemovalErrorMessage}
+        onClose={closeBackgroundRemovalModal}
+        onDownloadModel={(model) => void downloadBackgroundRemovalModel(model)}
+        onQuickRemove={() => void applyBackgroundRemoval(null)}
+        onFocusedRemove={(focusRect) => void applyBackgroundRemoval(focusRect)}
+      />
+
+      <ConversionModal
+        activeRequest={activeConversionRequest}
+        draft={rasterConversionDraft}
+        onDraftChange={setRasterConversionDraft}
+        onClose={closeConversionModal}
+        onApply={applyRasterConversion}
       />
     </div>
   );

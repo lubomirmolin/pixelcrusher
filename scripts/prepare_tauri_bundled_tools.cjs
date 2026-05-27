@@ -13,9 +13,10 @@ const BIN_DIR = path.join(OUTPUT_DIR, 'bin');
 const NODE_DIR = path.join(OUTPUT_DIR, 'node');
 const NODE_BIN_DIR = path.join(NODE_DIR, 'bin');
 const NODE_MODULES_DIR = path.join(NODE_DIR, 'node_modules');
+const RMBG_DIR = path.join(NODE_DIR, 'rmbg');
 const NODE_VERSION = process.env.PIXELCRUSHER_BUNDLED_NODE_VERSION || 'v22.14.0';
 
-const REQUIRED_TOOLS = ['cjpeg', 'pngquant', 'pngcrush', 'svgo', 'gifsicle'];
+const REQUIRED_TOOLS = ['cjpeg', 'pngquant', 'pngcrush', 'svgo', 'gifsicle', 'rmbg-remove'];
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -169,6 +170,9 @@ async function installSvgoRuntime(tmpDir, runtime) {
     private: true,
     version: '1.0.0',
     dependencies: {
+      'jpeg-js': '0.4.4',
+      'onnxruntime-node': '1.23.0',
+      'pngjs': '7.0.0',
       svgo: '4.0.0',
     },
   };
@@ -215,6 +219,43 @@ function writeSvgoWrapper() {
     'set -euo pipefail',
     'TOOL_ROOT="$(cd "$(dirname "$0")/.." && pwd)"',
     'exec "$TOOL_ROOT/node/bin/node" "$TOOL_ROOT/node/node_modules/svgo/bin/svgo.js" "$@"',
+    '',
+  ].join('\n');
+
+  fs.writeFileSync(wrapperPath, content, 'utf8');
+  fs.chmodSync(wrapperPath, 0o755);
+  return wrapperPath;
+}
+
+async function installRmbgRuntime() {
+  await fsp.mkdir(RMBG_DIR, { recursive: true });
+  await fsp.copyFile(
+    path.join(ROOT_DIR, 'scripts', 'rmbg', 'remove_bg.cjs'),
+    path.join(RMBG_DIR, 'remove_bg.cjs'),
+  );
+}
+
+function writeRmbgWrapper() {
+  if (process.platform === 'win32') {
+    const wrapperPath = path.join(BIN_DIR, 'rmbg-remove.cmd');
+    const content = [
+      '@echo off',
+      'setlocal',
+      'set "TOOL_ROOT=%~dp0.."',
+      '"%TOOL_ROOT%\\node\\bin\\node.exe" "%TOOL_ROOT%\\node\\rmbg\\remove_bg.cjs" %*',
+      '',
+    ].join('\r\n');
+
+    fs.writeFileSync(wrapperPath, content, 'utf8');
+    return wrapperPath;
+  }
+
+  const wrapperPath = path.join(BIN_DIR, 'rmbg-remove');
+  const content = [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    'TOOL_ROOT="$(cd "$(dirname "$0")/.." && pwd)"',
+    'exec "$TOOL_ROOT/node/bin/node" "$TOOL_ROOT/node/rmbg/remove_bg.cjs" "$@"',
     '',
   ].join('\n');
 
@@ -317,6 +358,7 @@ async function main() {
   await fsp.rm(OUTPUT_DIR, { recursive: true, force: true });
   await fsp.mkdir(BIN_DIR, { recursive: true });
   await fsp.mkdir(NODE_BIN_DIR, { recursive: true });
+  await fsp.writeFile(path.join(OUTPUT_DIR, '.gitkeep'), '');
 
   const binaries = [
     { name: 'cjpeg', moduleName: 'mozjpeg' },
@@ -347,12 +389,16 @@ async function main() {
   try {
     const runtime = await installNodeRuntime(tmpDir);
     await installSvgoRuntime(tmpDir, runtime);
+    await installRmbgRuntime();
   } finally {
     await fsp.rm(tmpDir, { recursive: true, force: true });
   }
 
   const svgoWrapperPath = writeSvgoWrapper();
   copied.push({ name: 'svgo', path: svgoWrapperPath });
+
+  const rmbgWrapperPath = writeRmbgWrapper();
+  copied.push({ name: 'rmbg-remove', path: rmbgWrapperPath });
 
   const nodeBinaryName = process.platform === 'win32' ? 'node.exe' : 'node';
   copied.push({

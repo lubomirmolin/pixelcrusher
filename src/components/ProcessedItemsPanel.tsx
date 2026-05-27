@@ -9,11 +9,13 @@ import {
   FolderOpen,
   Loader2,
   Maximize2,
+  RefreshCw,
+  WandSparkles,
   XCircle,
 } from 'lucide-react';
 import { formatBytes, type JobResultEntry, type JobSnapshot } from '../state/queueState';
-import type { FolderDropState, PunchQueueItem } from '../features/app/types';
-import { basename, formatSavings, toAssetUrl } from '../features/app/utils';
+import type { FolderDropState, OutputImageFormat, PunchQueueItem } from '../features/app/types';
+import { availableConversionFormats, basename, formatSavings, toAssetUrl } from '../features/app/utils';
 import { FolderPunchAnimation } from './FolderPunchAnimation';
 import { PunchEffectCanvas } from './PunchEffectCanvas';
 
@@ -26,6 +28,8 @@ type ProcessedItemsPanelProps = {
   scrollViewportRef: RefObject<HTMLDivElement | null>;
   onOpenItemCrop: (item: JobResultEntry) => void;
   onOpenItemResize: (item: JobResultEntry) => void;
+  onOpenItemBackgroundRemoval: (item: JobResultEntry) => void;
+  onOpenItemConversion: (item: JobResultEntry, targetFormat: OutputImageFormat) => void;
   onClearProcessedItems: () => void;
   onPunchComplete: () => void;
   onFolderPunchComplete: () => void;
@@ -98,9 +102,17 @@ function ItemResolution({ path }: { path: string }) {
 function FolderFileRow({
   job,
   result,
+  onOpenItemCrop,
+  onOpenItemResize,
+  onOpenItemBackgroundRemoval,
+  onOpenItemConversion,
 }: {
   job: JobSnapshot;
   result?: JobResultEntry;
+  onOpenItemCrop: (item: JobResultEntry) => void;
+  onOpenItemResize: (item: JobResultEntry) => void;
+  onOpenItemBackgroundRemoval: (item: JobResultEntry) => void;
+  onOpenItemConversion: (item: JobResultEntry, targetFormat: OutputImageFormat) => void;
 }) {
   const progress = Math.max(0, Math.min(100, job.progress));
   const outputPath = result?.output_path || job.input_path;
@@ -151,8 +163,100 @@ function FolderFileRow({
         </div>
       </div>
 
-      {isCompleted && result ? <ItemResolution path={outputPath} /> : null}
+      {isSuccessful && result ? (
+        <div className="mt-2 flex items-center justify-end gap-2">
+          <ItemResolution path={outputPath} />
+          <CompletedResultActions
+            item={result}
+            previewPath={outputPath}
+            onOpenItemCrop={onOpenItemCrop}
+            onOpenItemResize={onOpenItemResize}
+            onOpenItemBackgroundRemoval={onOpenItemBackgroundRemoval}
+            onOpenItemConversion={onOpenItemConversion}
+          />
+        </div>
+      ) : null}
       {job.status === 'failed' ? <div className="mt-2 text-[11px] text-[#9a2e3a]">{job.message || 'Failed'}</div> : null}
+    </div>
+  );
+}
+
+type CompletedResultActionsProps = {
+  item: JobResultEntry;
+  previewPath: string;
+  onOpenItemCrop: (item: JobResultEntry) => void;
+  onOpenItemResize: (item: JobResultEntry) => void;
+  onOpenItemBackgroundRemoval: (item: JobResultEntry) => void;
+  onOpenItemConversion: (item: JobResultEntry, targetFormat: OutputImageFormat) => void;
+};
+
+function supportsBackgroundRemoval(path: string): boolean {
+  const normalized = path.toLowerCase();
+  return normalized.endsWith('.png') || normalized.endsWith('.jpg') || normalized.endsWith('.jpeg');
+}
+
+function CompletedResultActions({
+  item,
+  previewPath,
+  onOpenItemCrop,
+  onOpenItemResize,
+  onOpenItemBackgroundRemoval,
+  onOpenItemConversion,
+}: CompletedResultActionsProps) {
+  const conversionTargets = availableConversionFormats(previewPath);
+
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        onClick={() => onOpenItemCrop(item)}
+        className="grid h-10 w-10 place-items-center rounded-lg border border-gray-200 bg-white text-gray-700 transition-colors hover:bg-black/5"
+        title="Crop image"
+      >
+        <Crop size={16} strokeWidth={1.7} />
+      </button>
+      <button
+        type="button"
+        onClick={() => onOpenItemResize(item)}
+        className="grid h-10 w-10 place-items-center rounded-lg border border-gray-200 bg-white text-gray-700 transition-colors hover:bg-black/5"
+        title="Resize image"
+      >
+        <Maximize2 size={16} strokeWidth={1.7} />
+      </button>
+      {supportsBackgroundRemoval(previewPath) ? (
+        <button
+          type="button"
+          onClick={() => onOpenItemBackgroundRemoval(item)}
+          className="grid h-10 w-10 place-items-center rounded-lg border border-gray-200 bg-white text-gray-700 transition-colors hover:bg-black/5"
+          title="Remove background"
+        >
+          <WandSparkles size={16} strokeWidth={1.7} />
+        </button>
+      ) : null}
+      {conversionTargets.length > 0 ? (
+        <div className="relative h-10 w-10">
+          <RefreshCw size={16} className="pointer-events-none absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2 text-gray-700" strokeWidth={1.7} />
+          <select
+            aria-label="Convert image format"
+            title="Convert image format"
+            value=""
+            onChange={(event) => {
+              const next = event.target.value as OutputImageFormat;
+              if (next) {
+                onOpenItemConversion(item, next);
+              }
+            }}
+            className="h-10 w-10 cursor-pointer appearance-none rounded-lg border border-gray-200 bg-white text-transparent transition-colors hover:bg-black/5"
+          >
+            <option value="">Convert</option>
+            {conversionTargets.map((format) => (
+              <option key={format} value={format}>
+                Convert to {format.toUpperCase() === 'JPEG' ? 'JPG' : format.toUpperCase()}
+              </option>
+            ))}
+          </select>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -166,6 +270,8 @@ export function ProcessedItemsPanel({
   scrollViewportRef,
   onOpenItemCrop,
   onOpenItemResize,
+  onOpenItemBackgroundRemoval,
+  onOpenItemConversion,
   onClearProcessedItems,
   onPunchComplete,
   onFolderPunchComplete,
@@ -252,7 +358,17 @@ export function ProcessedItemsPanel({
                     ) : (
                       folderJobs.map((job) => {
                         const result = resultById.get(job.id);
-                        return <FolderFileRow key={job.id} job={job} result={result} />;
+                        return (
+                          <FolderFileRow
+                            key={job.id}
+                            job={job}
+                            result={result}
+                            onOpenItemCrop={onOpenItemCrop}
+                            onOpenItemResize={onOpenItemResize}
+                            onOpenItemBackgroundRemoval={onOpenItemBackgroundRemoval}
+                            onOpenItemConversion={onOpenItemConversion}
+                          />
+                        );
                       })
                     )}
                   </div>
@@ -296,20 +412,14 @@ export function ProcessedItemsPanel({
 
                   <div className="ml-4 flex items-center space-x-2">
                     <ItemResolution path={previewPath} />
-                    <button
-                      onClick={() => onOpenItemCrop(item)}
-                      className="p-2 transition-colors bg-transparent rounded hover:bg-black/5 text-gray-600 tooltip-trigger"
-                      title="Crop Image"
-                    >
-                      <Crop size={16} strokeWidth={1.5} />
-                    </button>
-                    <button
-                      onClick={() => onOpenItemResize(item)}
-                      className="p-2 transition-colors bg-transparent rounded hover:bg-black/5 text-gray-600 tooltip-trigger"
-                      title="Resize Image"
-                    >
-                      <Maximize2 size={16} strokeWidth={1.5} />
-                    </button>
+                    <CompletedResultActions
+                      item={item}
+                      previewPath={previewPath}
+                      onOpenItemCrop={onOpenItemCrop}
+                      onOpenItemResize={onOpenItemResize}
+                      onOpenItemBackgroundRemoval={onOpenItemBackgroundRemoval}
+                      onOpenItemConversion={onOpenItemConversion}
+                    />
                   </div>
 
                   <div className="ml-4 w-6 flex justify-end">

@@ -12,16 +12,25 @@ pub(crate) struct RuntimeState {
     pub recent_results: Mutex<Vec<JobResultEntry>>,
     pub diagnostics: Vec<ToolStatusSnapshot>,
     pub output_dir: PathBuf,
+    pub bundled_tools_dir: Option<PathBuf>,
+    pub model_root_dir: PathBuf,
 }
 
 impl RuntimeState {
-    pub fn new(diagnostics: Vec<ToolStatusSnapshot>, output_dir: PathBuf) -> Self {
+    pub fn new(
+        diagnostics: Vec<ToolStatusSnapshot>,
+        output_dir: PathBuf,
+        bundled_tools_dir: Option<PathBuf>,
+        model_root_dir: PathBuf,
+    ) -> Self {
         Self {
             queue_machine: Mutex::new(QueueMachine::default()),
             jobs: Mutex::new(HashMap::new()),
             recent_results: Mutex::new(Vec::new()),
             diagnostics,
             output_dir,
+            bundled_tools_dir,
+            model_root_dir,
         }
     }
 }

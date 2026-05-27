@@ -1,6 +1,8 @@
+import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import type { JobResultEntry } from '../state/queueState';
 import type { ResizeDraft } from '../features/app/types';
+import { toAssetUrl } from '../features/app/utils';
 
 type ResizeModalProps = {
   activeItem: JobResultEntry | null;
@@ -10,7 +12,73 @@ type ResizeModalProps = {
   onApply: () => void;
 };
 
+type ImageSize = {
+  width: number;
+  height: number;
+};
+
+function parseDimension(value: string): number | null {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return Math.floor(parsed);
+}
+
 export function ResizeModal({ activeItem, draft, onDraftChange, onClose, onApply }: ResizeModalProps) {
+  const initializedPathRef = useRef<string | null>(null);
+  const [loadedSourceSize, setLoadedSourceSize] = useState<{ path: string; size: ImageSize } | null>(null);
+  const sourcePath = activeItem ? activeItem.output_path || activeItem.input_path : '';
+  const sourceSize = loadedSourceSize?.path === sourcePath ? loadedSourceSize.size : null;
+
+  useEffect(() => {
+    if (!activeItem || !sourcePath || initializedPathRef.current === sourcePath) {
+      return;
+    }
+
+    initializedPathRef.current = sourcePath;
+    const image = new Image();
+    image.onload = () => {
+      const nextSize = {
+        width: Math.max(1, image.naturalWidth),
+        height: Math.max(1, image.naturalHeight),
+      };
+      setLoadedSourceSize({ path: sourcePath, size: nextSize });
+      onDraftChange({
+        width: String(nextSize.width),
+        height: String(nextSize.height),
+        lock: true,
+      });
+    };
+    image.src = toAssetUrl(sourcePath);
+  }, [activeItem, onDraftChange, sourcePath]);
+
+  const updateWidth = (width: string) => {
+    if (!draft.lock || !sourceSize) {
+      onDraftChange({ ...draft, width });
+      return;
+    }
+
+    const parsedWidth = parseDimension(width);
+    const height = parsedWidth == null
+      ? draft.height
+      : String(Math.max(1, Math.round((parsedWidth * sourceSize.height) / sourceSize.width)));
+    onDraftChange({ ...draft, width, height });
+  };
+
+  const updateHeight = (height: string) => {
+    if (!draft.lock || !sourceSize) {
+      onDraftChange({ ...draft, height });
+      return;
+    }
+
+    const parsedHeight = parseDimension(height);
+    const width = parsedHeight == null
+      ? draft.width
+      : String(Math.max(1, Math.round((parsedHeight * sourceSize.width) / sourceSize.height)));
+    onDraftChange({ ...draft, width, height });
+  };
+
   if (!activeItem) {
     return null;
   }
@@ -28,21 +96,23 @@ export function ResizeModal({ activeItem, draft, onDraftChange, onClose, onApply
           <div className="space-y-4">
             <div className="flex items-center space-x-4">
               <div className="flex-1">
-                <label className="block text-[11px] font-medium mb-1 text-gray-800">Width</label>
+                <label htmlFor="resize-width" className="block text-[11px] font-medium mb-1 text-gray-800">Width</label>
                 <input
+                  id="resize-width"
                   type="number"
                   value={draft.width}
-                  onChange={(event) => onDraftChange({ ...draft, width: event.target.value })}
+                  onChange={(event) => updateWidth(event.target.value)}
                   className="w-full text-[13px] px-2 py-1.5 focus:outline-none bg-white border-b-2 border-gray-300 rounded text-gray-900 focus:border-[#005fb8]"
                 />
               </div>
               <div className="mt-5 text-gray-400"><X size={14} /></div>
               <div className="flex-1">
-                <label className="block text-[11px] font-medium mb-1 text-gray-800">Height</label>
+                <label htmlFor="resize-height" className="block text-[11px] font-medium mb-1 text-gray-800">Height</label>
                 <input
+                  id="resize-height"
                   type="number"
                   value={draft.height}
-                  onChange={(event) => onDraftChange({ ...draft, height: event.target.value })}
+                  onChange={(event) => updateHeight(event.target.value)}
                   className="w-full text-[13px] px-2 py-1.5 focus:outline-none bg-white border-b-2 border-gray-300 rounded text-gray-900 focus:border-[#005fb8]"
                 />
               </div>
@@ -67,7 +137,8 @@ export function ResizeModal({ activeItem, draft, onDraftChange, onClose, onApply
           </button>
           <button
             onClick={onApply}
-            className="px-6 py-1.5 shadow-sm text-[13px] font-medium transition-colors bg-[#005fb8] border border-transparent rounded text-white hover:bg-[#0058a6]"
+            disabled={parseDimension(draft.width) == null || parseDimension(draft.height) == null}
+            className="px-6 py-1.5 shadow-sm text-[13px] font-medium transition-colors bg-[#005fb8] border border-transparent rounded text-white hover:bg-[#0058a6] disabled:opacity-50"
           >
             Apply
           </button>
